@@ -4,7 +4,7 @@ import datetime
 from config import MIN_DELAY, MAX_DELAY, TYPING_SPEED, MAX_TYPING_TIME
 from database.mongo import get_setting
 
-# ── Sentiment Detection ───────────────────────────────────────
+# ── Sentiment Detection ────────────────────────────────────────
 _POSITIVE = ["good","great","awesome","love","happy","thanks","thank","nice","wow",
              "amazing","accha","badiya","shukriya","pyar","mast","zabardast","superb"]
 _NEGATIVE = ["bad","hate","sad","angry","worst","bura","nahi","problem","boring",
@@ -18,60 +18,32 @@ def detect_sentiment(text: str) -> str:
     if neg > pos:  return "negative"
     return "neutral"
 
-
-# ── Typing Simulation ─────────────────────────────────────────
+# ── Typing Simulation ──────────────────────────────────────────
 async def simulate_typing(client, chat_id, reply_text: str, source_text: str = ""):
-    """
-    Human-like delay:
-    - Base random delay (reading time)
-    - Extra delay if user's message is long (they wrote a lot → takes time to read + reply)
-    - Typing duration proportional to reply length
-    """
-    min_d = await get_setting("min_delay_override", MIN_DELAY)
+    min_d      = await get_setting("min_delay_override", MIN_DELAY)
     base_delay = random.uniform(float(min_d), MAX_DELAY)
-
-    # Longer incoming message = more "reading" time
     word_count = len(source_text.split()) if source_text else 0
-    reading_bonus = min(word_count * 0.08, 4.0)   # max 4s bonus
+    reading_bonus = min(word_count * 0.08, 4.0)
+    await asyncio.sleep(base_delay + reading_bonus)
 
-    total_delay = base_delay + reading_bonus
-    await asyncio.sleep(total_delay)
-
-    # Typing duration based on reply length
     typing_time = min(len(reply_text) * TYPING_SPEED, MAX_TYPING_TIME)
-    typing_time += random.uniform(-0.2, 0.4)
-    typing_time = max(0.8, typing_time)
-
+    typing_time = max(0.8, typing_time + random.uniform(-0.2, 0.4))
     async with client.action(chat_id, "typing"):
         await asyncio.sleep(typing_time)
 
-
-# ── Big Animated Reactions ────────────────────────────────────
+# ── Reactions ─────────────────────────────────────────────────
 from config import POSITIVE_REACTIONS, NEGATIVE_REACTIONS, NEUTRAL_REACTIONS
 
 async def send_reaction(client, message, sentiment: str = "neutral"):
-    """Send a big animated reaction based on sentiment."""
     try:
-        if sentiment == "positive":
-            pool = POSITIVE_REACTIONS
-        elif sentiment == "negative":
-            pool = NEGATIVE_REACTIONS
-        else:
-            pool = NEUTRAL_REACTIONS
-
-        reaction = random.choice(pool)
-
-        # big=True → animated/big reaction (Telegram Premium feature)
-        await client.send_reaction(
-            message.chat_id,
-            message.id,
-            reaction,
-            big=True,
+        pool = (
+            POSITIVE_REACTIONS if sentiment == "positive"
+            else NEGATIVE_REACTIONS if sentiment == "negative"
+            else NEUTRAL_REACTIONS
         )
+        await client.send_reaction(message.chat_id, message.id, random.choice(pool), big=True)
     except Exception:
-        # Silently fail if reactions not supported
         pass
-
 
 # ── DND Check ─────────────────────────────────────────────────
 async def is_dnd_active() -> bool:
@@ -81,8 +53,8 @@ async def is_dnd_active() -> bool:
         return False
     try:
         start_str, end_str = dnd.split("-")
-        sh, sm  = map(int, start_str.strip().split(":"))
-        eh, em  = map(int, end_str.strip().split(":"))
+        sh, sm = map(int, start_str.strip().split(":"))
+        eh, em = map(int, end_str.strip().split(":"))
         now     = datetime.datetime.now()
         current = now.hour * 60 + now.minute
         start   = sh * 60 + sm
