@@ -2,11 +2,7 @@
 scheduler.py — AI-generated greetings, unique every time.
 Supports Groq, SambaNova, NVIDIA NIM.
 """
-import asyncio
-import datetime
-import httpx
-import random
-
+import asyncio, datetime, httpx, random
 from config import (
     SAMBANOVA_API_KEY, GROQ_API_KEY, NVIDIA_API_KEY,
     SAMBANOVA_MODEL, GROQ_MODEL_70B, NVIDIA_MODEL_70B,
@@ -21,19 +17,15 @@ _sent_history: dict = {}
 _HISTORY_SIZE = 10
 
 PERSONA_MAP = {
-    "TechnicalSerena": "Serena",
-    "technicalserena": "Serena",
-    "Xioqui_Xin":      "Xioqui",
-    "xioqui_xin":      "Xioqui",
+    "TechnicalSerena": "Serena", "technicalserena": "Serena",
+    "Xioqui_Xin": "Xioqui",     "xioqui_xin":      "Xioqui",
 }
 
 def _persona_name(username) -> str:
     return PERSONA_MAP.get(username or "", "me")
 
-
-async def _try_api(url: str, api_key: str, model: str, system: str, user_msg: str):
-    if not api_key:
-        return None
+async def _try_api(url, api_key, model, system, user_msg):
+    if not api_key: return None
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
         "model": model,
@@ -46,9 +38,8 @@ async def _try_api(url: str, api_key: str, model: str, system: str, user_msg: st
             if resp.status_code == 200:
                 return resp.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        print(f"[Scheduler] API error {url}: {e}")
+        print(f"[Scheduler] Error: {e}")
     return None
-
 
 async def _generate_greeting(stype: str, username, uid: int) -> str:
     persona = _persona_name(username)
@@ -67,28 +58,21 @@ async def _generate_greeting(stype: str, username, uid: int) -> str:
     )
     user_msg = f"Send a {greeting_type} message."
 
-    # Get preferred model from DB, try it first
     preferred = await get_setting("preferred_model", "sambanova")
-    order = [preferred] + [m for m in ["sambanova", "groq_70b", "nvidia_70b"] if m != preferred]
-
     model_map = {
-        "sambanova":   (SAMBANOVA_URL, SAMBANOVA_API_KEY, SAMBANOVA_MODEL),
-        "groq_70b":    (GROQ_URL,      GROQ_API_KEY,      GROQ_MODEL_70B),
-        "groq_8b":     (GROQ_URL,      GROQ_API_KEY,      "llama-3.1-8b-instant"),
-        "nvidia_70b":  (NVIDIA_URL,    NVIDIA_API_KEY,    NVIDIA_MODEL_70B),
-        "nvidia_maverick": (NVIDIA_URL, NVIDIA_API_KEY,   "meta/llama-4-maverick-17b-128e-instruct"),
+        "sambanova":       (SAMBANOVA_URL, SAMBANOVA_API_KEY, SAMBANOVA_MODEL),
+        "groq_70b":        (GROQ_URL,      GROQ_API_KEY,      GROQ_MODEL_70B),
+        "groq_8b":         (GROQ_URL,      GROQ_API_KEY,      "llama-3.1-8b-instant"),
+        "nvidia_70b":      (NVIDIA_URL,    NVIDIA_API_KEY,    NVIDIA_MODEL_70B),
+        "nvidia_maverick": (NVIDIA_URL,    NVIDIA_API_KEY,    "meta/llama-4-maverick-17b-128e-instruct"),
     }
-
+    order = [preferred] + [m for m in ["sambanova", "groq_70b", "nvidia_70b"] if m != preferred]
     for mid in order:
         info = model_map.get(mid)
-        if not info:
-            continue
-        url, key, model = info
-        result = await _try_api(url, key, model, system, user_msg)
-        if result:
-            return result
+        if not info: continue
+        result = await _try_api(*info, system, user_msg)
+        if result: return result
 
-    # Hard fallback
     fallbacks = {
         "morning":   ["Good morning! ☀️", "Morning! Hope your day's great 🌅", "Rise and shine! ✨"],
         "afternoon": ["Good afternoon! 😊", "Hey, hope your day's going well! ☀️"],
@@ -99,12 +83,10 @@ async def _generate_greeting(stype: str, username, uid: int) -> str:
     fresh    = [m for m in options if m not in past_set]
     return random.choice(fresh if fresh else options)
 
-
 def _record_sent(uid: int, msg: str):
     _sent_history.setdefault(uid, []).append(msg)
     if len(_sent_history[uid]) > _HISTORY_SIZE:
         _sent_history[uid] = _sent_history[uid][-_HISTORY_SIZE:]
-
 
 async def run_scheduler(client, me_username=None):
     print("[Scheduler] Started.")
@@ -113,24 +95,18 @@ async def run_scheduler(client, me_username=None):
             now          = datetime.datetime.now()
             current_time = now.strftime("%H:%M")
             schedules    = await get_active_schedules()
-
             for s in schedules:
-                if s.get("time") != current_time:
-                    continue
+                if s.get("time") != current_time: continue
                 uid   = s["user_id"]
                 stype = s["type"]
-
-                msg = await _generate_greeting(stype, me_username, uid)
+                msg   = await _generate_greeting(stype, me_username, uid)
                 _record_sent(uid, msg)
-
                 try:
                     await client.send_message(uid, msg)
                     await increment_stat("total_replies")
                     print(f"[Scheduler] Sent {stype} to {uid}: {msg}")
                 except Exception as e:
                     print(f"[Scheduler] Send error → {uid}: {e}")
-
         except Exception as e:
             print(f"[Scheduler] Loop error: {e}")
-
         await asyncio.sleep(60)

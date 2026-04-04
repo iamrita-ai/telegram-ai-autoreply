@@ -4,7 +4,7 @@ from config import (
     GROQ_API_KEY, SAMBANOVA_API_KEY, NVIDIA_API_KEY,
     GROQ_MODEL_70B, GROQ_MODEL_8B, SAMBANOVA_MODEL,
     NVIDIA_MODEL_70B, NVIDIA_MODEL_MAVERICK,
-    DEFAULT_PROMPT, BUSY_MESSAGES,
+    BUSY_MESSAGES,
 )
 from database.mongo import get_prompt, get_conversation, add_message, get_setting
 
@@ -12,7 +12,12 @@ GROQ_URL      = "https://api.groq.com/openai/v1/chat/completions"
 SAMBANOVA_URL = "https://api.sambanova.ai/v1/chat/completions"
 NVIDIA_URL    = "https://integrate.api.nvidia.com/v1/chat/completions"
 
-def _resolve_model(model_id: str) -> tuple | None:
+PERSONA_MAP = {
+    "TechnicalSerena": "Serena", "technicalserena": "Serena",
+    "Xioqui_Xin":      "Xioqui", "xioqui_xin":      "Xioqui",
+}
+
+def _resolve_model(model_id: str):
     mapping = {
         "groq_70b":        (GROQ_URL,      GROQ_API_KEY,      GROQ_MODEL_70B),
         "groq_8b":         (GROQ_URL,      GROQ_API_KEY,      GROQ_MODEL_8B),
@@ -22,33 +27,23 @@ def _resolve_model(model_id: str) -> tuple | None:
     }
     return mapping.get(model_id)
 
-PERSONA_MAP = {
-    "TechnicalSerena": "Serena",
-    "technicalserena": "Serena",
-    "Xioqui_Xin":      "Xioqui",
-    "xioqui_xin":      "Xioqui",
-}
-
 async def _get_persona_prompt(custom_prompt, me_username):
     if custom_prompt:
         return custom_prompt
     persona = PERSONA_MAP.get(me_username or "", "the account owner")
-    gender_line = (
-        "You are a female. Respond naturally as a girl would."
-        if persona in ("Serena", "Xioqui") else ""
-    )
+    gender_line = "You are a female. Respond naturally as a girl would." if persona in ("Serena", "Xioqui") else ""
     return f"""You are {persona}, a real person chatting on Telegram.
 
 {gender_line}
 
 Rules (NEVER break these):
-- You are a HUMAN. NEVER say you are an AI, bot, or assistant.
-- If asked "are you AI?", casually deny: "Nahi yaar, main hi hun 😄"
+- You are a HUMAN. NEVER say you are an AI, bot, or assistant — under ANY circumstances.
+- If asked "are you AI?", casually deny: "Nahi yaar, main hi hun 😄" or "Haha nope, real person 😂"
 - Reply in SAME language as user (Hindi, Hinglish, English, Urdu)
-- Keep replies short: 1-3 sentences unless something detailed asked
-- Sound casual, warm, natural — like a real person texting
+- Keep replies short: 1-3 sentences unless detail asked
+- Sound casual, warm — like a real person texting
 - Max 1-2 emojis per message
-- Never start with "I" — vary starters
+- Never start with "I"
 - Your name is {persona}"""
 
 async def _call_api(url: str, api_key: str, model: str, messages: list):
@@ -61,7 +56,7 @@ async def _call_api(url: str, api_key: str, model: str, messages: list):
             resp = await client.post(url, headers=headers, json=payload)
             if resp.status_code == 200:
                 return resp.json()["choices"][0]["message"]["content"].strip()
-            print(f"[AI] {url} → {resp.status_code}")
+            print(f"[AI] {model} → HTTP {resp.status_code}")
             return None
     except Exception as e:
         print(f"[AI] Error: {e}")
@@ -85,11 +80,11 @@ async def get_ai_reply(user_id: int, user_message: str, me_username=None):
         url, key, model = resolved
         reply = await _call_api(url, key, model, messages)
         if reply is None:
-            print(f"[AI] {preferred} failed → trying fallback chain")
+            print(f"[AI] {preferred} failed → fallback chain")
 
-    fallback_chain = ["sambanova", "groq_70b", "groq_8b", "nvidia_70b", "nvidia_maverick"]
+    fallback_order = ["sambanova", "groq_70b", "groq_8b", "nvidia_70b", "nvidia_maverick"]
     if reply is None:
-        for fb_id in fallback_chain:
+        for fb_id in fallback_order:
             if fb_id == preferred:
                 continue
             fb = _resolve_model(fb_id)
@@ -100,7 +95,7 @@ async def get_ai_reply(user_id: int, user_message: str, me_username=None):
                 continue
             reply = await _call_api(url, key, model, messages)
             if reply:
-                print(f"[AI] Fallback succeeded: {fb_id}")
+                print(f"[AI] Fallback OK: {fb_id}")
                 break
 
     if reply is None:

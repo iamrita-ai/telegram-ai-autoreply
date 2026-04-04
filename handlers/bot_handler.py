@@ -1,6 +1,5 @@
 """
-bot_handler.py — Full control via Telegram Bot
-Login flow: /login → phone number → OTP → (2FA if needed) → done
+bot_handler.py — Telegram Control Bot with inline model selector
 """
 import re
 import asyncio
@@ -18,47 +17,35 @@ from database.mongo import (
     set_login_state, get_login_state,
 )
 
-_user_client_ref = []
+_user_client_ref      = []
 _start_user_client_fn = None
 
-
 def set_user_client(client):
-    if _user_client_ref:
-        _user_client_ref[0] = client
-    else:
-        _user_client_ref.append(client)
-
+    if _user_client_ref: _user_client_ref[0] = client
+    else: _user_client_ref.append(client)
 
 def get_user_client():
     return _user_client_ref[0] if _user_client_ref else None
 
-
 def _is_owner(event):
     return event.sender_id in OWNER_IDS
-
 
 def _clean_otp(raw: str) -> str:
     return re.sub(r"[^0-9]", "", raw)
 
-
 async def _reply(event, text: str, buttons=None):
     await event.respond(text, parse_mode="markdown", buttons=buttons)
 
-
 def _build_model_buttons():
-    """Build inline buttons for available models (only if API key is set)."""
     available = get_available_models()
     if not available:
         return None
-    # 1 button per row
     return [[Button.inline(m["label"], data=f"model:{m['id']}")] for m in available]
-
 
 def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
     global _start_user_client_fn
     _start_user_client_fn = start_user_client_fn
 
-    # ── /start ────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/start$"))
     async def cmd_start(event):
         if not _is_owner(event): return
@@ -68,10 +55,8 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
             f"🤖 **Userbot Control Panel**\n"
             f"━━━━━━━━━━━━━━━━━\n"
             f"Account: {status}\n\n"
-            f"Send /help for all commands."
-        )
+            f"Send /help for all commands.")
 
-    # ── /login ────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/login$"))
     async def cmd_login(event):
         if not _is_owner(event): return
@@ -79,21 +64,16 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
             await _reply(event, "✅ Already logged in! Use /logout first to switch.")
             return
         await set_login_state({"step": "awaiting_phone"})
-        await _reply(event,
-            "📱 Send your **phone number** with country code:\n"
-            "Example: `+923001234567`"
-        )
+        await _reply(event, "📱 Send your **phone number** with country code:\nExample: `+923001234567`")
 
-    # ── Catch-all for login steps ─────────────────────────────
     @bot.on(events.NewMessage())
     async def handle_login_input(event):
         if not _is_owner(event): return
         if not event.text: return
         if event.text.startswith("/"): return
-
         state = await get_login_state()
         if not state: return
-        step  = state.get("step")
+        step = state.get("step")
 
         if step == "awaiting_phone":
             phone = event.text.strip()
@@ -104,17 +84,9 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
                 tmp = TelegramClient(StringSession(), API_ID, API_HASH)
                 await tmp.connect()
                 result = await tmp.send_code_request(phone)
-                await set_login_state({
-                    "step":            "awaiting_otp",
-                    "phone":           phone,
-                    "phone_code_hash": result.phone_code_hash,
-                })
+                await set_login_state({"step": "awaiting_otp", "phone": phone, "phone_code_hash": result.phone_code_hash})
                 await tmp.disconnect()
-                await _reply(event,
-                    f"✅ OTP sent to `{phone}`\n\n"
-                    f"Send the OTP here.\n"
-                    f"_(Spaces allowed — e.g. `5 7 2 0 0 2`)_"
-                )
+                await _reply(event, f"✅ OTP sent to `{phone}`\n\nSend the OTP here.\n_(Spaces allowed — e.g. `5 7 2 0 0 2`)_")
             except Exception as e:
                 await set_login_state(None)
                 await _reply(event, f"❌ Error sending OTP: `{e}`\nTry /login again.")
@@ -125,8 +97,8 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
             if len(otp) < 5:
                 await _reply(event, "❗ Invalid OTP. Try again.")
                 return
+            tmp = TelegramClient(StringSession(), API_ID, API_HASH)
             try:
-                tmp = TelegramClient(StringSession(), API_ID, API_HASH)
                 await tmp.connect()
                 await tmp.sign_in(phone, otp, phone_code_hash=state["phone_code_hash"])
                 sess = tmp.session.save()
@@ -138,11 +110,7 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
             except SessionPasswordNeededError:
                 sess_so_far = tmp.session.save()
                 await tmp.disconnect()
-                await set_login_state({
-                    "step": "awaiting_2fa",
-                    "phone": phone,
-                    "session_so_far": sess_so_far,
-                })
+                await set_login_state({"step": "awaiting_2fa", "phone": phone, "session_so_far": sess_so_far})
                 await _reply(event, "🔐 **2FA enabled.** Send your Telegram password:")
             except PhoneCodeInvalidError:
                 await set_login_state(None)
@@ -175,20 +143,16 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
         except Exception as e:
             await _reply(event, f"⚠️ Start error: `{e}`")
 
-    # ── /logout ───────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/logout$"))
     async def cmd_logout(event):
         if not _is_owner(event): return
         uc = get_user_client()
         if uc:
-            try:
-                await uc.log_out()
-            except Exception:
-                pass
+            try: await uc.log_out()
+            except Exception: pass
         await delete_session()
         await _reply(event, "👋 **Logged out.** Session deleted.")
 
-    # ── /lock / /unlock ───────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/lock$"))
     async def cmd_lock(event):
         if not _is_owner(event): return
@@ -201,7 +165,6 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
         await set_setting("locked", False)
         await _reply(event, "🔓 **Unlocked!** Auto-replies active.")
 
-    # ── /status ───────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/status$"))
     async def cmd_status(event):
         if not _is_owner(event): return
@@ -212,15 +175,8 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
         total   = await get_stat("total_replies")
         today   = await get_stat("today_replies")
         session = await load_session()
-
-        # Get human-readable model label
-        available = get_available_models()
-        model_label = model
-        for m in available:
-            if m["id"] == model:
-                model_label = m["label"]
-                break
-
+        available   = get_available_models()
+        model_label = next((m["label"] for m in available if m["id"] == model), model)
         await _reply(event,
             f"⚡ **Status**\n"
             f"━━━━━━━━━━━━━━━━━\n"
@@ -231,10 +187,8 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
             f"📅 **Today:** {today}\n"
             f"😴 **DND:** {dnd or 'Off'}\n"
             f"📝 **Prompt:** {'Custom ✅' if prompt else 'Default'}\n"
-            f"━━━━━━━━━━━━━━━━━"
-        )
+            f"━━━━━━━━━━━━━━━━━")
 
-    # ── /stats ────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/stats$"))
     async def cmd_stats(event):
         if not _is_owner(event): return
@@ -242,7 +196,6 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
         today = await get_stat("today_replies")
         await _reply(event, f"📊 **Stats**\n💬 Total: `{total}`\n📅 Today: `{today}`")
 
-    # ── /prompt ───────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/prompt (.+)"))
     async def cmd_prompt(event):
         if not _is_owner(event): return
@@ -262,7 +215,6 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
         p = await get_prompt()
         await _reply(event, f"📝 **Current Prompt:**\n\n{p or '_Default_'}")
 
-    # ── /blacklist / /whitelist ───────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/blacklist (\d+)$"))
     async def cmd_blacklist(event):
         if not _is_owner(event): return
@@ -274,28 +226,26 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
     async def cmd_unblacklist(event):
         if not _is_owner(event): return
         await unblacklist_user(int(event.pattern_match.group(1)))
-        await _reply(event, f"✅ Removed from blacklist!")
+        await _reply(event, "✅ Removed from blacklist!")
 
     @bot.on(events.NewMessage(pattern=r"^/whitelist (\d+)$"))
     async def cmd_whitelist(event):
         if not _is_owner(event): return
         await whitelist_user(int(event.pattern_match.group(1)))
-        await _reply(event, f"⭐ Whitelisted!")
+        await _reply(event, "⭐ Whitelisted!")
 
     @bot.on(events.NewMessage(pattern=r"^/unwhitelist (\d+)$"))
     async def cmd_unwhitelist(event):
         if not _is_owner(event): return
         await unwhitelist_user(int(event.pattern_match.group(1)))
-        await _reply(event, f"❌ Removed from whitelist!")
+        await _reply(event, "❌ Removed from whitelist!")
 
-    # ── /clearhistory ─────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/clearhistory (\d+)$"))
     async def cmd_clearhistory(event):
         if not _is_owner(event): return
         await clear_history(int(event.pattern_match.group(1)))
-        await _reply(event, f"🗑️ History cleared!")
+        await _reply(event, "🗑️ History cleared!")
 
-    # ── /delay ────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/delay (\d+\.?\d*)$"))
     async def cmd_delay(event):
         if not _is_owner(event): return
@@ -303,7 +253,7 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
         await set_setting("min_delay_override", d)
         await _reply(event, f"⏱️ Min delay: `{d}s`")
 
-    # ── /model — Show inline buttons ──────────────────────────
+    # ── /model — Inline buttons ────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/model$"))
     async def cmd_model(event):
         if not _is_owner(event): return
@@ -311,54 +261,38 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
         if not buttons:
             await _reply(event,
                 "❌ **No AI API keys found!**\n\n"
-                "Please set at least one of these in Render ENV:\n"
-                "`GROQ_API_KEY` / `SAMBANOVA_API_KEY` / `NVIDIA_API_KEY`"
-            )
+                "Set at least one in Render ENV:\n"
+                "`GROQ_API_KEY` / `SAMBANOVA_API_KEY` / `NVIDIA_API_KEY`")
             return
-        current = await get_setting("preferred_model", "sambanova")
-        available = get_available_models()
-        current_label = current
-        for m in available:
-            if m["id"] == current:
-                current_label = m["label"]
-                break
+        current     = await get_setting("preferred_model", "sambanova")
+        available   = get_available_models()
+        cur_label   = next((m["label"] for m in available if m["id"] == current), current)
         await _reply(event,
             f"🤖 **Select AI Model**\n"
             f"━━━━━━━━━━━━━━━━━\n"
-            f"Current: **{current_label}**\n\n"
-            f"Tap a button to switch model:\n"
-            f"_(Only models with valid API key are shown)_",
-            buttons=buttons,
-        )
+            f"Current: **{cur_label}**\n\n"
+            f"Tap a button to switch:\n"
+            f"_(Only keys set in ENV are shown)_",
+            buttons=buttons)
 
-    # ── Inline button callback for model selection ─────────────
     @bot.on(events.CallbackQuery(pattern=rb"^model:(.+)$"))
     async def callback_model(event):
         if not _is_owner(event): return
-        model_id = event.data.decode().split("model:")[1]
+        model_id  = event.data.decode().split("model:")[1]
         available = get_available_models()
-
-        selected = None
-        for m in available:
-            if m["id"] == model_id:
-                selected = m
-                break
-
+        selected  = next((m for m in available if m["id"] == model_id), None)
         if not selected:
-            await event.answer("❌ Model not available. Check API key in ENV.", alert=True)
+            await event.answer("❌ Model unavailable. Check API key.", alert=True)
             return
-
         await set_setting("preferred_model", model_id)
-        await event.answer(f"✅ Switched to {selected['label']}", alert=False)
+        await event.answer(f"✅ Switched!", alert=False)
         await event.edit(
             f"✅ **Model Updated!**\n"
             f"━━━━━━━━━━━━━━━━━\n"
             f"🤖 Now using: **{selected['label']}**\n\n"
             f"_Use /model to switch again._",
-            parse_mode="markdown",
-        )
+            parse_mode="markdown")
 
-    # ── /dnd ──────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/dnd (.+)$"))
     async def cmd_dnd(event):
         if not _is_owner(event): return
@@ -371,7 +305,6 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
         await set_dnd(None)
         await _reply(event, "✅ DND OFF")
 
-    # ── /schedule ─────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/schedule (\d+) (morning|afternoon|night) (\d{1,2}:\d{2})$"))
     async def cmd_schedule(event):
         if not _is_owner(event): return
@@ -387,7 +320,6 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
         await remove_schedule(int(event.pattern_match.group(1)), event.pattern_match.group(2))
         await _reply(event, "❌ Schedule removed!")
 
-    # ── /help ─────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/help$"))
     async def cmd_help(event):
         if not _is_owner(event): return
@@ -408,5 +340,4 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
             "😴 `/dnd HH:MM-HH:MM` · `/dndoff`\n"
             "📅 `/schedule <id> morning|afternoon|night HH:MM`\n"
             "❌ `/unschedule <id> morning|afternoon|night`\n"
-            "━━━━━━━━━━━━━━━━━"
-        )
+            "━━━━━━━━━━━━━━━━━")
