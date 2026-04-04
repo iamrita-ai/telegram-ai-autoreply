@@ -7,7 +7,11 @@ def _now() -> str:
 
 
 async def log_message(client, event, reply_text: str, is_group: bool = False):
-    """Send a formatted message log to the log channel."""
+    """
+    Send a formatted message log to the log channel.
+    ONLY called when the bot actually replied — so group messages where
+    users are just chatting among themselves are NEVER logged here.
+    """
     if not LOG_CHANNEL_ID:
         return
     try:
@@ -19,7 +23,8 @@ async def log_message(client, event, reply_text: str, is_group: bool = False):
         link     = f"[{name}](tg://user?id={sender.id})"
 
         if is_group:
-            loc = f"👥 **Group:** {getattr(chat, 'title', 'Unknown')}"
+            group_title = getattr(chat, "title", "Unknown Group")
+            loc = f"👥 **Group:** {group_title}"
         else:
             loc = "💬 **DM**"
 
@@ -42,7 +47,7 @@ async def log_message(client, event, reply_text: str, is_group: bool = False):
 
 
 async def log_edited(client, event):
-    """Log when someone edits a message."""
+    """Log when someone edits a message (only for DM/mentioned conversations)."""
     if not LOG_CHANNEL_ID:
         return
     try:
@@ -60,7 +65,7 @@ async def log_edited(client, event):
 
 
 async def log_deleted(client, event):
-    """Log deleted messages (if text was captured before deletion)."""
+    """Log deleted messages (content unavailable — Telegram limitation)."""
     if not LOG_CHANNEL_ID:
         return
     try:
