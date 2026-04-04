@@ -25,27 +25,45 @@ from handlers.scheduler   import run_scheduler
 from utils.helpers        import simulate_typing, send_reaction, detect_sentiment, is_dnd_active
 
 # ── Active user clients registry ─────────────────────────────
-# Supports multiple logged-in accounts simultaneously
 _active_clients: list[TelegramClient] = []
 _me_usernames:   list[str]            = []
+_me_ids:         list[int]            = []   # ← track own user IDs
 
 
-def _attach_userbot_handlers(client: TelegramClient, me_username: str):
+def _attach_userbot_handlers(client: TelegramClient, me_username: str, me_id: int):
     """Attach message handlers to a user client."""
 
     @client.on(events.NewMessage(incoming=True))
     async def handle_incoming(event):
         try:
             if await is_locked(): return
+
             sender = await event.get_sender()
+
+            # Skip bots
             if isinstance(sender, User) and sender.bot: return
-            if event.sender_id in OWNER_IDS: return
+
+            # ── FIX 1: Skip OWNER only if message is NOT from another
+            #    account of ours messaging THIS account.
+            #    i.e. skip if sender_id == THIS account's own id,
+            #    but allow if another owner-account DMs this session.
+            if event.sender_id == me_id: return          # can't reply to yourself
+            # (Removed: if event.sender_id in OWNER_IDS: return)
+            # Owner DMs should be handled — they are real incoming messages
+            # from @technicalserena → @xioqui_xin or vice-versa.
+
+            # Skip media-only messages
             if event.photo or event.video or event.gif or event.sticker or event.voice or event.audio: return
             if not event.text or not event.text.strip(): return
+
             if await is_blacklisted(event.sender_id): return
 
             is_private   = event.is_private
             is_mentioned = event.mentioned
+
+            # ── FIX 2: In groups — ONLY reply when bot is mentioned.
+            #    Do NOT reply to general group chatter.
+            #    Do NOT log group messages unless WE reply.
             if not is_private and not is_mentioned: return
 
             if await is_dnd_active():
@@ -56,12 +74,17 @@ def _attach_userbot_handlers(client: TelegramClient, me_username: str):
 
             reply, _ = await get_ai_reply(event.sender_id, event.text, me_username=me_username)
             sentiment = detect_sentiment(event.text)
+
+            # ── FIX 3: Reaction first, then typing, then reply (correct order)
             await send_reaction(client, event, sentiment)
             await simulate_typing(client, event.chat_id, reply, source_text=event.text)
             await event.reply(reply)
+
+            # ── FIX 4: Log ONLY messages we actually replied to
             await log_message(client, event, reply, is_group=not is_private)
             await increment_stat("total_replies")
             await increment_stat("today_replies")
+
         except Exception as e:
             print(f"[Handler:{me_username}] {e}")
 
@@ -70,14 +93,14 @@ def _attach_userbot_handlers(client: TelegramClient, me_username: str):
         try:
             sender = await event.get_sender()
             if isinstance(sender, User) and sender.bot: return
-            if event.sender_id in OWNER_IDS: return
+            if event.sender_id == me_id: return
             if event.text:
                 await log_edited(client, event)
         except Exception as e:
             print(f"[EditHandler:{me_username}] {e}")
 
 
-async def _launch_client(client: TelegramClient):
+async def _launch_client(client: TelegramClient, me_obj=None):
     """
     Connect, verify, attach handlers, and register a user client.
     Accepts an already-connected client (from login flow) or creates fresh.
@@ -89,18 +112,20 @@ async def _launch_client(client: TelegramClient):
         print("[UserClient] Session invalid.")
         return False
 
-    me = await client.get_me()
+    me = me_obj or await client.get_me()
     username = me.username or str(me.id)
-    print(f"[UserClient] Active: {me.first_name} @{username} ({me.id})")
+    me_id    = me.id
+    print(f"[UserClient] Active: {me.first_name} @{username} ({me_id})")
 
-    _attach_userbot_handlers(client, username)
-    set_user_client(client)          # last registered = default ref
+    _attach_userbot_handlers(client, username, me_id)
+    set_user_client(client)
     await log_startup(client, me)
     asyncio.create_task(run_scheduler(client, username))
     asyncio.create_task(client.run_until_disconnected())
 
     _active_clients.append(client)
     _me_usernames.append(username)
+    _me_ids.append(me_id)
     return True
 
 
@@ -111,14 +136,11 @@ async def start_user_client(existing_client: TelegramClient = None, me=None):
     - On boot: loads all sessions from DB and starts each
     """
     if existing_client is not None:
-        # Fresh login: client already connected & authorized
-        await _launch_client(existing_client)
+        await _launch_client(existing_client, me_obj=me)
         return
 
-    # Boot: load ALL saved sessions (multi-account)
     sessions = await load_all_sessions()
     if not sessions:
-        # Fallback: try legacy single session
         single = await load_session()
         if single:
             sessions = [{"user_id": 0, "session": single}]
