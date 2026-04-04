@@ -18,58 +18,41 @@ def detect_sentiment(text: str) -> str:
     if neg > pos:  return "negative"
     return "neutral"
 
-# ── Typing Simulation (ChatGPT-style animated cursor) ─────────
+# ── Typing Simulation (ChatGPT-style) ─────────────────────────
 async def simulate_typing(client, chat_id, reply_text: str, source_text: str = ""):
-    """
-    Realistic typing animation:
-    1. Reading delay  — simulates reading the user's message
-    2. Thinking pause — short pause before starting to type
-    3. Typing action  — shows 'typing...' while 'composing' reply
-       - For longer replies: pauses and restarts typing action (like real user)
-    """
     min_d = await get_setting("min_delay_override", MIN_DELAY)
 
-    # Phase 1: reading delay (based on incoming message length)
     word_count    = len(source_text.split()) if source_text else 0
     reading_delay = min(word_count * 0.09, 3.5) + random.uniform(0.5, 1.2)
     await asyncio.sleep(reading_delay)
 
-    # Phase 2: calculate realistic typing duration
-    char_count   = len(reply_text)
-    typing_time  = min(char_count * TYPING_SPEED, MAX_TYPING_TIME)
-    typing_time  = max(1.0, typing_time + random.uniform(-0.3, 0.5))
+    char_count  = len(reply_text)
+    typing_time = min(char_count * TYPING_SPEED, MAX_TYPING_TIME)
+    typing_time = max(1.0, typing_time + random.uniform(-0.3, 0.5))
 
-    # Phase 3: chunked typing animation (mimics human pauses mid-sentence)
-    # Split into 1–3 chunks for realism on longer replies
     if typing_time > 3.5:
-        # Two bursts of typing with a tiny pause (like thinking)
         chunk1 = typing_time * random.uniform(0.45, 0.60)
         pause  = random.uniform(0.4, 0.9)
         chunk2 = typing_time - chunk1
-
         async with client.action(chat_id, "typing"):
             await asyncio.sleep(chunk1)
-        await asyncio.sleep(pause)                        # brief "thinking" gap
+        await asyncio.sleep(pause)
         async with client.action(chat_id, "typing"):
             await asyncio.sleep(chunk2)
     else:
-        # Short reply — single continuous typing burst
         async with client.action(chat_id, "typing"):
             await asyncio.sleep(typing_time)
 
-    # Small final delay before message appears (natural send latency)
     await asyncio.sleep(random.uniform(0.1, 0.3))
 
 
-# ── Reactions (Big animated reaction) ─────────────────────────
+# ── Reactions (Big animated — works on all Telethon versions) ──
 from config import POSITIVE_REACTIONS, NEGATIVE_REACTIONS, NEUTRAL_REACTIONS
-from telethon.tl.functions.messages import SendReactionRequest
-from telethon.tl.types import ReactionEmoji
 
 async def send_reaction(client, event, sentiment: str = "neutral"):
     """
-    Send a big animated reaction to the user's message.
-    Uses Telethon's raw API (SendReactionRequest) for proper big=True support.
+    Big animated reaction using raw TL layer directly.
+    Tries 3 methods in order until one works.
     """
     try:
         pool = (
@@ -79,15 +62,48 @@ async def send_reaction(client, event, sentiment: str = "neutral"):
         )
         emoji = random.choice(pool)
 
-        await client(SendReactionRequest(
-            peer      = event.chat_id,
-            msg_id    = event.id,
-            big       = True,           # ← animated big reaction ✅
-            reactions = [ReactionEmoji(emoticon=emoji)],
-        ))
-    except Exception as e:
-        # Reactions may fail in old groups/channels — silently ignore
-        print(f"[Reaction] Failed: {e}")
+        # Method 1: Most modern Telethon (reactions= list)
+        try:
+            from telethon.tl.functions.messages import SendReactionRequest
+            from telethon.tl.types import ReactionEmoji
+            await client(SendReactionRequest(
+                peer      = event.chat_id,
+                msg_id    = event.id,
+                big       = True,
+                reactions = [ReactionEmoji(emoticon=emoji)],
+            ))
+            return
+        except TypeError:
+            pass
+
+        # Method 2: Older Telethon (reaction= singular)
+        try:
+            from telethon.tl.functions.messages import SendReactionRequest
+            from telethon.tl.types import ReactionEmoji
+            await client(SendReactionRequest(
+                peer     = event.chat_id,
+                msg_id   = event.id,
+                big      = True,
+                reaction = [ReactionEmoji(emoticon=emoji)],
+            ))
+            return
+        except TypeError:
+            pass
+
+        # Method 3: Very old Telethon — emoji string directly
+        try:
+            from telethon.tl.functions.messages import SendReactionRequest
+            await client(SendReactionRequest(
+                peer     = event.chat_id,
+                msg_id   = event.id,
+                reaction = emoji,
+            ))
+            return
+        except Exception:
+            pass
+
+    except Exception:
+        pass  # Silently skip — old groups block reactions
 
 
 # ── DND Check ─────────────────────────────────────────────────
