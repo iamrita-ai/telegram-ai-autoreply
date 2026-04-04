@@ -17,9 +17,10 @@ from database.mongo import (
     save_session, load_session, delete_session, load_all_sessions,
     set_setting, get_setting, is_locked, get_prompt,
     get_stat, blacklist_user, unblacklist_user,
-    whitelist_user, unwhitelist_user, clear_history,
+    whitelist_user, unwhitelist_user, clear_history, clear_all_history,
     set_dnd, get_dnd, add_schedule, remove_schedule,
     set_login_state, get_login_state,
+    allow_group, disallow_group, list_allowed_groups,
 )
 
 # ── In-memory: keep TelegramClient alive across OTP steps ─────
@@ -457,6 +458,38 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
         await remove_schedule(int(event.pattern_match.group(1)), event.pattern_match.group(2))
         await _reply(event, "❌ Schedule removed!")
 
+    # ── /allowgroup ────────────────────────────────────────────
+    @bot.on(events.NewMessage(pattern=r"^/allowgroup (-?\d+)$"))
+    async def cmd_allowgroup(event):
+        if not _is_owner(event): return
+        gid = int(event.pattern_match.group(1))
+        await allow_group(gid)
+        await _reply(event, f"✅ **Group Allowed!**\n🆔 `{gid}` added to whitelist.\nBot ab is group mein reply karega jab mention ho.")
+
+    @bot.on(events.NewMessage(pattern=r"^/disallowgroup (-?\d+)$"))
+    async def cmd_disallowgroup(event):
+        if not _is_owner(event): return
+        gid = int(event.pattern_match.group(1))
+        await disallow_group(gid)
+        await _reply(event, f"❌ **Group Removed!**\n🆔 `{gid}` whitelist se hata diya.")
+
+    @bot.on(events.NewMessage(pattern=r"^/listgroups$"))
+    async def cmd_listgroups(event):
+        if not _is_owner(event): return
+        groups = await list_allowed_groups()
+        if not groups:
+            await _reply(event, "📋 **Allowed Groups:** _Koi nahi_ — pehle /allowgroup use karo.")
+            return
+        lines = "\n".join(f"• `{g}`" for g in groups)
+        await _reply(event, f"📋 **Allowed Groups ({len(groups)}):**\n{lines}")
+
+    # ── /clearallhistory ────────────────────────────────────────
+    @bot.on(events.NewMessage(pattern=r"^/clearallhistory$"))
+    async def cmd_clearallhistory(event):
+        if not _is_owner(event): return
+        await clear_all_history()
+        await _reply(event, "🗑️ **Sabki history clear!** Sab users ki conversation wipe ho gayi.")
+
     # ── /help ──────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/help$"))
     async def cmd_help(event):
@@ -506,8 +539,19 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
             "  → Roz subah 8 baje us user ko good morning bhejega\n"
             "`/unschedule <user_id> morning|afternoon|night`\n"
             "  Example: `/unschedule 123456789 morning`\n\n"
+            "**👥 GROUP CONTROL**\n"
+            "`/allowgroup <group_id>` — Is group mein reply allow karo\n"
+            "  Example: `/allowgroup -1001234567890`\n"
+            "  Group ID pata karne ke liye: Group mein `/start` bhejo @userinfobot ko\n"
+            "`/disallowgroup <group_id>` — Group hatao\n"
+            "`/listgroups` — Saare allowed groups dekho\n\n"
+            "**🗑️ HISTORY**\n"
+            "`/clearhistory <user_id>` — Ek user ki history clear karo\n"
+            "`/clearallhistory` — Sabki history ek saath wipe karo\n"
+            "  Auto-cleanup: DM history 14 din baad, Group history 24 ghante baad delete\n\n"
             "**💡 TIPS**\n"
-            "• User ID pata karne ke liye: @userinfobot pe forward karo\n"
-            "• India number: `+91` se shuru karo ya seedha `9876543210`\n"
-            "• Groups mein bot sirf tab reply karta hai jab @mention ho\n"
+            "• User ID: @userinfobot pe message forward karo\n"
+            "• India number: `+91` ya seedha `9876543210` likhna kaafi hai\n"
+            "• Groups mein bot sirf tab reply karta hai jab @mention ho AND group allowed ho\n"
+            "• Agar user 1-2 words bheje to bot wait karta hai pura message aane tak\n"
             "━━━━━━━━━━━━━━━━━")
