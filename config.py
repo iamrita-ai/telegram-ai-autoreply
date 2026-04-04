@@ -1,5 +1,6 @@
 import os
 import random
+import datetime
 
 # ============================================================
 #   OWNER CONFIGURATION
@@ -37,11 +38,8 @@ GROQ_MODEL_8B         = "llama-3.1-8b-instant"
 SAMBANOVA_MODEL       = "Meta-Llama-3.3-70B-Instruct"
 NVIDIA_MODEL_70B      = "meta/llama-3.3-70b-instruct"
 NVIDIA_MODEL_MAVERICK = "meta/llama-4-maverick-17b-128e-instruct"
+GROQ_MODEL            = GROQ_MODEL_70B
 
-# Legacy alias
-GROQ_MODEL = GROQ_MODEL_70B
-
-# ── Available models (only those with API key set) ────────────
 def get_available_models() -> list:
     models = []
     if GROQ_API_KEY:
@@ -55,9 +53,9 @@ def get_available_models() -> list:
     return models
 
 # ============================================================
-#   LOG CHANNEL
+#   LOG CHANNEL — disabled
 # ============================================================
-LOG_CHANNEL_ID = int(os.environ.get("LOG_CHANNEL_ID", "0"))
+LOG_CHANNEL_ID = 0
 
 # ============================================================
 #   DELAY SETTINGS
@@ -68,22 +66,6 @@ TYPING_SPEED    = 0.04
 MAX_TYPING_TIME = 6.0
 
 # ============================================================
-#   DEFAULT AI PERSONALITY
-# ============================================================
-DEFAULT_PROMPT = """You are an AI assistant responding on behalf of the account owner on Telegram.
-
-Personality: Be witty, sharp, and direct like Grok AI — no fluff, a touch of dry humor, never robotic.
-
-Rules:
-- Always reply in the SAME language the user writes in (Hindi, Hinglish, English, Urdu, etc.)
-- Keep replies short: 1 to 3 sentences unless the user asks something detailed
-- Never reveal you are an AI unless directly asked. If asked say "Main khud hoon 😄"
-- Max 1-2 emojis per message
-- Sound casual and natural
-- Never start with "I" — vary your openers
-- Match tone: chill to chill, serious to slightly formal"""
-
-# ============================================================
 #   REACTIONS
 # ============================================================
 POSITIVE_REACTIONS = ["❤️", "🔥", "👍", "😍", "🤩", "💯", "🎉", "✨", "🫡"]
@@ -92,15 +74,62 @@ NEUTRAL_REACTIONS  = ["👍", "🤝", "👀", "😂", "🤔", "💀"]
 
 # ============================================================
 #   BUSY / FALLBACK MESSAGES
+#   — Rotates daily so same excuse never repeats
+#   — 30 unique sets: leaving / busy / sleeping (10 each)
 # ============================================================
-BUSY_MESSAGES = [
-    "Yaar abhi kaam mein hun, thodi der mein reply karunga 🙏",
-    "Bhai sone ja raha hun 😴 Kal baat karte hain!",
-    "Chal main chalta hun, kaam hai mujhe! Baad mein baat karte hain 😅",
-    "Abhi busy hun bhai, thoda wait karo ✌️",
-    "Main unavailable hun filhaal, baad mein ping karo!",
-    "Arey yaar abhi nahi, kuch urgent hai! 🏃",
+
+_LEAVING_MSGS = [
+    "Chal nikalna hai, baad mein baat karte hain 🙏",
+    "Kuch urgent aa gaya, thodi der mein wapas aata hun",
+    "Abhi door hun, ping karo kal",
+    "Nikal raha hun, catch you later ✌️",
+    "Bhai kaam hai yaar, baad mein",
+    "Jaana padega, hold on karo",
+    "Running out, talk soon",
+    "Gotta go, ping me later",
+    "Thoda busy ho gaya hun, baad mein",
+    "Abhi nahi yaar, thodi der mein 🙏",
 ]
+_BUSY_MSGS = [
+    "Abhi kaam mein hun, ek second",
+    "Thoda tied up hun, baad mein reply karunga",
+    "Busy hun yaar, wait karo",
+    "Kuch kaam hai, thodi der mein",
+    "Distracted hun abhi, baad mein",
+    "Occupied right now, bear with me",
+    "Stuck in something, brb",
+    "On it with something else, hold on",
+    "Thoda handle karna hai kuch, 2 min",
+    "Mid something, hit me later",
+]
+_SLEEPING_MSGS = [
+    "Neend aa rahi hai yaar 😴 kal milte hain",
+    "Sone ja raha hun, good night",
+    "Off ho raha hun, kal baat karte hain",
+    "Tired hun, rest kar raha hun",
+    "Calling it a night, talk tmrw 🌙",
+    "Ja raha hun so, baad mein",
+    "Eyes closing, gn yaar",
+    "Dozing off, catch you tmrw",
+    "Kal baat karte hain, raat ho gayi",
+    "Sleep mode on 😴",
+]
+
+def _day_seed() -> int:
+    """Same seed for the whole day → same message set each day, changes next day."""
+    d = datetime.date.today()
+    return d.year * 10000 + d.month * 100 + d.day
+
+def get_busy_message() -> str:
+    """Returns a random busy message. Pool changes every day."""
+    rng   = random.Random(_day_seed())
+    pool  = _LEAVING_MSGS + _BUSY_MSGS + _SLEEPING_MSGS
+    # Pick 5 for today, then random from those 5
+    today_pool = rng.sample(pool, 5)
+    return random.choice(today_pool)
+
+# Keep BUSY_MESSAGES list for backward compat (ai_handler uses random.choice)
+BUSY_MESSAGES = _LEAVING_MSGS + _BUSY_MSGS + _SLEEPING_MSGS
 
 # ============================================================
 #   SCHEDULED MESSAGE TEMPLATES

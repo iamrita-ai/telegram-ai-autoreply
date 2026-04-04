@@ -18,6 +18,7 @@ from config import API_ID, API_HASH, BOT_TOKEN, OWNER_IDS
 from database.mongo import (
     load_session, load_all_sessions,
     is_locked, is_blacklisted, increment_stat,
+    is_group_allowed, auto_cleanup_history,
 )
 from handlers.ai_handler  import get_ai_reply
 from handlers.bot_handler import register_bot_handlers, set_user_client
@@ -25,14 +26,12 @@ from handlers.logger      import log_message, log_edited, log_startup
 from handlers.scheduler   import run_scheduler
 from utils.helpers        import simulate_typing, send_reaction, detect_sentiment, is_dnd_active
 
-# ── Active user clients registry ─────────────────────────────
 _active_clients: list[TelegramClient] = []
 _me_usernames:   list[str]            = []
-_me_ids:         list[int]            = []   # ← track own user IDs
+_me_ids:         list[int]            = []
 
 
 def _attach_userbot_handlers(client: TelegramClient, me_username: str, me_id: int):
-    """Attach message handlers to a user client."""
 
     @client.on(events.NewMessage(incoming=True))
     async def handle_incoming(event):
@@ -40,32 +39,20 @@ def _attach_userbot_handlers(client: TelegramClient, me_username: str, me_id: in
             if await is_locked(): return
 
             sender = await event.get_sender()
-
-            # Skip bots
             if isinstance(sender, User) and sender.bot: return
+            if event.sender_id == me_id: return
 
-            # ── FIX 1: Skip OWNER only if message is NOT from another
-            #    account of ours messaging THIS account.
-            #    i.e. skip if sender_id == THIS account's own id,
-            #    but allow if another owner-account DMs this session.
-            if event.sender_id == me_id: return          # can't reply to yourself
-            # (Removed: if event.sender_id in OWNER_IDS: return)
-            # Owner DMs should be handled — they are real incoming messages
-            # from @technicalserena → @xioqui_xin or vice-versa.
-
-            # Skip media-only messages
             if event.photo or event.video or event.gif or event.sticker or event.voice or event.audio: return
             if not event.text or not event.text.strip(): return
-
             if await is_blacklisted(event.sender_id): return
 
             is_private   = event.is_private
             is_mentioned = event.mentioned
 
-            # ── FIX 2: In groups — ONLY reply when bot is mentioned.
-            #    Do NOT reply to general group chatter.
-            #    Do NOT log group messages unless WE reply.
-            if not is_private and not is_mentioned: return
+            # ── Group: only reply if group is allowed AND bot is mentioned
+            if not is_private:
+                if not is_mentioned: return
+                if not await is_group_allowed(event.chat_id): return
 
             if await is_dnd_active():
                 if is_private:
@@ -73,15 +60,22 @@ def _attach_userbot_handlers(client: TelegramClient, me_username: str, me_id: in
                     await event.reply("😴 Sone ja raha hun, kal baat karte hain!")
                 return
 
-            reply, _ = await get_ai_reply(event.sender_id, event.text, me_username=me_username)
-            sentiment = detect_sentiment(event.text)
+            # ── Get AI reply (handles incomplete message buffering)
+            reply, is_busy = await get_ai_reply(
+                event.sender_id,
+                event.text,
+                me_username=me_username,
+                is_group=not is_private,
+            )
 
-            # ── FIX 3: Reaction first, then typing, then reply (correct order)
+            # reply=None means message was buffered (incomplete) — wait for more
+            if reply is None:
+                return
+
+            sentiment = detect_sentiment(event.text)
             await send_reaction(client, event, sentiment)
             await simulate_typing(client, event.chat_id, reply, source_text=event.text)
             await event.reply(reply)
-
-            # ── FIX 4: Log ONLY messages we actually replied to
             await log_message(client, event, reply, is_group=not is_private)
             await increment_stat("total_replies")
             await increment_stat("today_replies")
@@ -101,11 +95,17 @@ def _attach_userbot_handlers(client: TelegramClient, me_username: str, me_id: in
             print(f"[EditHandler:{me_username}] {e}")
 
 
+async def _cleanup_loop():
+    """Runs every hour — cleans old history automatically."""
+    while True:
+        try:
+            await auto_cleanup_history()
+        except Exception as e:
+            print(f"[Cleanup] {e}")
+        await asyncio.sleep(3600)   # every 1 hour
+
+
 async def _launch_client(client: TelegramClient, me_obj=None):
-    """
-    Connect, verify, attach handlers, and register a user client.
-    Accepts an already-connected client (from login flow) or creates fresh.
-    """
     if not client.is_connected():
         await client.connect()
 
@@ -113,12 +113,12 @@ async def _launch_client(client: TelegramClient, me_obj=None):
         print("[UserClient] Session invalid.")
         return False
 
-    me = me_obj or await client.get_me()
+    me       = me_obj or await client.get_me()
     username = me.username or str(me.id)
     me_id    = me.id
     print(f"[UserClient] Active: {me.first_name} @{username} ({me_id})")
 
-    # Always appear offline — bot runs silently in background
+    # Always appear offline
     try:
         await client(UpdateStatusRequest(offline=True))
     except Exception:
@@ -137,11 +137,6 @@ async def _launch_client(client: TelegramClient, me_obj=None):
 
 
 async def start_user_client(existing_client: TelegramClient = None, me=None):
-    """
-    Called on boot AND after /login.
-    - existing_client: freshly-logged-in client from bot_handler login flow
-    - On boot: loads all sessions from DB and starts each
-    """
     if existing_client is not None:
         await _launch_client(existing_client, me_obj=me)
         return
@@ -180,6 +175,9 @@ async def main():
     print(f"[ControlBot] @{me.username} running")
 
     await start_user_client()
+
+    # Start background cleanup loop
+    asyncio.create_task(_cleanup_loop())
 
     print("[System] All services ready.")
     await bot.run_until_disconnected()
