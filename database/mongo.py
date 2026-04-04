@@ -25,18 +25,58 @@ schedules_col = db.schedules
 stats_col     = db.stats
 session_col   = db.session
 
-# ── Session ────────────────────────────────────────────────────
-async def save_session(session_string: str):
-    encrypted = _encrypt(session_string)
-    await session_col.update_one({"key": "session"}, {"$set": {"value": encrypted}}, upsert=True)
+# ── Session (per-user, no conflict) ───────────────────────────
+# Each Telegram account gets its own doc keyed by user_id.
+# Legacy single-doc support also included.
 
-async def load_session():
-    doc = await session_col.find_one({"key": "session"})
-    if not doc: return None
+async def save_session(session_string: str, user_id: int = 0):
+    encrypted = _encrypt(session_string)
+    # Save under user_id key
+    await session_col.update_one(
+        {"key": f"session_{user_id}"},
+        {"$set": {"value": encrypted, "user_id": user_id, "updated_at": datetime.datetime.utcnow()}},
+        upsert=True,
+    )
+    # Also keep legacy key so load_session() without user_id still works
+    await session_col.update_one(
+        {"key": "session"},
+        {"$set": {"value": encrypted, "user_id": user_id, "updated_at": datetime.datetime.utcnow()}},
+        upsert=True,
+    )
+
+async def load_session(user_id: int = 0):
+    # Try per-user key first
+    doc = await session_col.find_one({"key": f"session_{user_id}"})
+    if not doc:
+        # Fall back to legacy single-session doc
+        doc = await session_col.find_one({"key": "session"})
+    if not doc:
+        return None
     return _decrypt(doc["value"])
 
-async def delete_session():
-    await session_col.delete_one({"key": "session"})
+async def load_all_sessions() -> list:
+    """Load all stored sessions for multi-account support."""
+    docs = await session_col.find({"key": {"$regex": "^session_"}}).to_list(None)
+    result = []
+    for doc in docs:
+        try:
+            result.append({
+                "user_id": doc.get("user_id", 0),
+                "session": _decrypt(doc["value"]),
+            })
+        except Exception:
+            pass
+    return result
+
+async def delete_session(user_id: int = 0):
+    await session_col.delete_one({"key": f"session_{user_id}"})
+    # If it was the only session, also remove legacy doc
+    count = await session_col.count_documents({"key": {"$regex": "^session_"}})
+    if count == 0:
+        await session_col.delete_one({"key": "session"})
+
+async def delete_all_sessions():
+    await session_col.delete_many({})
 
 # ── Settings ───────────────────────────────────────────────────
 async def get_setting(key: str, default=None):
