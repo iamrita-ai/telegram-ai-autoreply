@@ -14,18 +14,24 @@ from telethon.sessions import StringSession
 from telethon.tl.types import User
 
 from config import API_ID, API_HASH, BOT_TOKEN, OWNER_IDS
-from database.mongo import load_session, is_locked, is_blacklisted, increment_stat
+from database.mongo import (
+    load_session, load_all_sessions,
+    is_locked, is_blacklisted, increment_stat,
+)
 from handlers.ai_handler  import get_ai_reply
 from handlers.bot_handler import register_bot_handlers, set_user_client
 from handlers.logger      import log_message, log_edited, log_startup
 from handlers.scheduler   import run_scheduler
 from utils.helpers        import simulate_typing, send_reaction, detect_sentiment, is_dnd_active
 
-user_client  = None
-_me_username = None
+# ── Active user clients registry ─────────────────────────────
+# Supports multiple logged-in accounts simultaneously
+_active_clients: list[TelegramClient] = []
+_me_usernames:   list[str]            = []
 
 
-def _attach_userbot_handlers(client: TelegramClient):
+def _attach_userbot_handlers(client: TelegramClient, me_username: str):
+    """Attach message handlers to a user client."""
 
     @client.on(events.NewMessage(incoming=True))
     async def handle_incoming(event):
@@ -48,7 +54,7 @@ def _attach_userbot_handlers(client: TelegramClient):
                     await event.reply("😴 Sone ja raha hun, kal baat karte hain!")
                 return
 
-            reply, _ = await get_ai_reply(event.sender_id, event.text, me_username=_me_username)
+            reply, _ = await get_ai_reply(event.sender_id, event.text, me_username=me_username)
             sentiment = detect_sentiment(event.text)
             await send_reaction(client, event, sentiment)
             await simulate_typing(client, event.chat_id, reply, source_text=event.text)
@@ -57,7 +63,7 @@ def _attach_userbot_handlers(client: TelegramClient):
             await increment_stat("total_replies")
             await increment_stat("today_replies")
         except Exception as e:
-            print(f"[Handler] {e}")
+            print(f"[Handler:{me_username}] {e}")
 
     @client.on(events.MessageEdited(incoming=True))
     async def handle_edited(event):
@@ -68,43 +74,84 @@ def _attach_userbot_handlers(client: TelegramClient):
             if event.text:
                 await log_edited(client, event)
         except Exception as e:
-            print(f"[EditHandler] {e}")
+            print(f"[EditHandler:{me_username}] {e}")
 
 
-async def start_user_client():
-    global user_client, _me_username
-    session_str = await load_session()
-    if not session_str:
-        print("[UserClient] No session. Use /login in control bot.")
+async def _launch_client(client: TelegramClient):
+    """
+    Connect, verify, attach handlers, and register a user client.
+    Accepts an already-connected client (from login flow) or creates fresh.
+    """
+    if not client.is_connected():
+        await client.connect()
+
+    if not await client.is_user_authorized():
+        print("[UserClient] Session invalid.")
+        return False
+
+    me = await client.get_me()
+    username = me.username or str(me.id)
+    print(f"[UserClient] Active: {me.first_name} @{username} ({me.id})")
+
+    _attach_userbot_handlers(client, username)
+    set_user_client(client)          # last registered = default ref
+    await log_startup(client, me)
+    asyncio.create_task(run_scheduler(client, username))
+    asyncio.create_task(client.run_until_disconnected())
+
+    _active_clients.append(client)
+    _me_usernames.append(username)
+    return True
+
+
+async def start_user_client(existing_client: TelegramClient = None, me=None):
+    """
+    Called on boot AND after /login.
+    - existing_client: freshly-logged-in client from bot_handler login flow
+    - On boot: loads all sessions from DB and starts each
+    """
+    if existing_client is not None:
+        # Fresh login: client already connected & authorized
+        await _launch_client(existing_client)
         return
-    if user_client and user_client.is_connected():
-        await user_client.disconnect()
-    user_client = TelegramClient(StringSession(session_str), API_ID, API_HASH)
-    await user_client.connect()
-    if not await user_client.is_user_authorized():
-        print("[UserClient] Session invalid. Use /login again.")
+
+    # Boot: load ALL saved sessions (multi-account)
+    sessions = await load_all_sessions()
+    if not sessions:
+        # Fallback: try legacy single session
+        single = await load_session()
+        if single:
+            sessions = [{"user_id": 0, "session": single}]
+
+    if not sessions:
+        print("[UserClient] No sessions found. Use /login in control bot.")
         return
-    me = await user_client.get_me()
-    _me_username = me.username
-    print(f"[UserClient] Logged in as: {me.first_name} @{me.username} ({me.id})")
-    _attach_userbot_handlers(user_client)
-    set_user_client(user_client)
-    await log_startup(user_client, me)
-    asyncio.create_task(run_scheduler(user_client, me.username))
-    asyncio.create_task(user_client.run_until_disconnected())
-    print("[UserClient] Running!")
+
+    for s in sessions:
+        sess_str = s.get("session")
+        if not sess_str:
+            continue
+        client = TelegramClient(StringSession(sess_str), API_ID, API_HASH)
+        ok = await _launch_client(client)
+        if not ok:
+            print(f"[UserClient] Session for user_id={s.get('user_id')} invalid, skipping.")
+
+    print(f"[UserClient] {len(_active_clients)} account(s) running.")
 
 
 async def main():
     print("=" * 45)
     print("  Userbot + Control Bot Starting...")
     print("=" * 45)
+
     bot = TelegramClient("bot_session", API_ID, API_HASH)
     await bot.start(bot_token=BOT_TOKEN)
     register_bot_handlers(bot, start_user_client)
     me = await bot.get_me()
     print(f"[ControlBot] @{me.username} running")
+
     await start_user_client()
+
     print("[System] All services ready.")
     await bot.run_until_disconnected()
 
@@ -121,4 +168,5 @@ if __name__ == "__main__":
     server = HTTPServer(("0.0.0.0", port), PingHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"[Web] Keep-alive on :{port}")
+
     asyncio.run(main())
