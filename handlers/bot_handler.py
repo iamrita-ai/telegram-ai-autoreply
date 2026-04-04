@@ -51,8 +51,8 @@ def _normalize_phone(raw: str) -> str:
     Accept phone with or without country code.
     - +923001234567  → +923001234567  (already correct)
     - 923001234567   → +923001234567  (add +)
-    - 03001234567    → +923001234567  (Pakistani local → international)
-    - 3001234567     → +923001234567  (missing leading 0)
+    - 9876543210     → +919876543210  (Indian number → international)
+    - 09876543210    → +919876543210  (with leading 0)
     Falls back to adding '+' prefix if phonenumbers lib not available.
     """
     raw = raw.strip().replace(" ", "").replace("-", "")
@@ -65,9 +65,9 @@ def _normalize_phone(raw: str) -> str:
                 return phonenumbers.format_number(p, phonenumbers.PhoneNumberFormat.E164)
         except Exception:
             pass
-        # Try as Pakistani number (default region PK)
+        # Try as Indian number (default region IN)
         try:
-            p = phonenumbers.parse(raw, "PK")
+            p = phonenumbers.parse(raw, "IN")
             if phonenumbers.is_valid_number(p):
                 return phonenumbers.format_number(p, phonenumbers.PhoneNumberFormat.E164)
         except Exception:
@@ -462,20 +462,52 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
     async def cmd_help(event):
         if not _is_owner(event): return
         await _reply(event,
-            "🤖 **Userbot Commands**\n"
-            "━━━━━━━━━━━━━━━━━\n"
-            "🔑 `/login` — Login (phone → OTP → 2FA)\n"
-            "🚪 `/logout` — Logout & delete session\n"
-            "🔒 `/lock` · 🔓 `/unlock`\n"
-            "📊 `/status` · 📈 `/stats`\n"
-            "📝 `/prompt <text>` — Set AI persona\n"
-            "🗑️ `/clearprompt` · 📋 `/getprompt`\n"
-            "🚫 `/blacklist <id>` · ✅ `/unblacklist <id>`\n"
-            "⭐ `/whitelist <id>` · ❌ `/unwhitelist <id>`\n"
-            "🗑️ `/clearhistory <id>`\n"
-            "⏱️ `/delay <sec>`\n"
-            "🤖 `/model` — Switch AI model _(inline buttons)_\n"
-            "😴 `/dnd HH:MM-HH:MM` · `/dndoff`\n"
-            "📅 `/schedule <id> morning|afternoon|night HH:MM`\n"
-            "❌ `/unschedule <id> morning|afternoon|night`\n"
+            "🤖 **Userbot — Full Command Guide**\n"
+            "━━━━━━━━━━━━━━━━━\n\n"
+            "**🔑 LOGIN / LOGOUT**\n"
+            "`/login` — Account login karo\n"
+            "  Step 1: Phone number bhejo\n"
+            "  Example: `+919876543210` ya `9876543210`\n"
+            "  Step 2: OTP bhejo jo Telegram ne bheja\n"
+            "  Example: `5 7 2 0 0 2` ya `572002`\n"
+            "  Step 3: 2FA password (agar laga hua ho)\n"
+            "`/logout` — Session delete karo\n\n"
+            "**🔒 LOCK / UNLOCK**\n"
+            "`/lock` — Auto-reply band karo (bot sona chahta hai 😴)\n"
+            "`/unlock` — Auto-reply chalu karo\n\n"
+            "**📊 STATUS / STATS**\n"
+            "`/status` — Sab settings ek jagah dekho\n"
+            "`/stats` — Kitne replies hue aaj aur total\n\n"
+            "**🤖 AI MODEL**\n"
+            "`/model` — AI model change karo (buttons se)\n"
+            "  Available: Groq, SambaNova, NVIDIA\n\n"
+            "**📝 CUSTOM PROMPT**\n"
+            "`/prompt <text>` — AI ka style/persona badlo\n"
+            "  Example: `/prompt Tum Serena ho, Hinglish mein baat karo`\n"
+            "`/clearprompt` — Default prompt wapas lao\n"
+            "`/getprompt` — Current prompt dekho\n\n"
+            "**🚫 BLACKLIST / WHITELIST**\n"
+            "`/blacklist <user_id>` — Is user ko reply mat karo\n"
+            "  Example: `/blacklist 123456789`\n"
+            "`/unblacklist <user_id>` — Blacklist se hata do\n"
+            "`/whitelist <user_id>` — VIP user (hamesha reply)\n"
+            "`/unwhitelist <user_id>` — Whitelist se hata do\n"
+            "`/clearhistory <user_id>` — Us user ki chat history clear karo\n\n"
+            "**⏱️ DELAY**\n"
+            "`/delay <seconds>` — Reply karne se pehle kitna rukna hai\n"
+            "  Example: `/delay 2.5` → 2.5 second baad reply karega\n\n"
+            "**😴 DND (Do Not Disturb)**\n"
+            "`/dnd HH:MM-HH:MM` — Is time ke beech reply nahi karega\n"
+            "  Example: `/dnd 23:00-07:00` → Raat 11 se subah 7 tak off\n"
+            "`/dndoff` — DND hatao, wapas active\n\n"
+            "**📅 SCHEDULED MESSAGES**\n"
+            "`/schedule <user_id> morning|afternoon|night HH:MM`\n"
+            "  Example: `/schedule 123456789 morning 08:00`\n"
+            "  → Roz subah 8 baje us user ko good morning bhejega\n"
+            "`/unschedule <user_id> morning|afternoon|night`\n"
+            "  Example: `/unschedule 123456789 morning`\n\n"
+            "**💡 TIPS**\n"
+            "• User ID pata karne ke liye: @userinfobot pe forward karo\n"
+            "• India number: `+91` se shuru karo ya seedha `9876543210`\n"
+            "• Groups mein bot sirf tab reply karta hai jab @mention ho\n"
             "━━━━━━━━━━━━━━━━━")
