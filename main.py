@@ -12,6 +12,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.types import User
+from telethon.tl.functions.account import UpdateStatusRequest
 
 from config import API_ID, API_HASH, BOT_TOKEN, OWNER_IDS
 from database.mongo import (
@@ -116,6 +117,12 @@ async def _launch_client(client: TelegramClient, me_obj=None):
     username = me.username or str(me.id)
     me_id    = me.id
     print(f"[UserClient] Active: {me.first_name} @{username} ({me_id})")
+
+    # Always appear offline — bot runs silently in background
+    try:
+        await client(UpdateStatusRequest(offline=True))
+    except Exception:
+        pass
 
     _attach_userbot_handlers(client, username, me_id)
     set_user_client(client)
