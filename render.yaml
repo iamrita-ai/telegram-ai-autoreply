@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: userbot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: PYTHONPATH
+        value: /opt/render/project/src
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: PHONE_NUMBER
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: MONGO_URI
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: SAMBANOVA_API_KEY
+        sync: false
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: LOG_CHANNEL_ID
+        sync: false
+      - key: ENCRYPTION_KEY
+        sync: false
