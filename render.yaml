@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: userbot
+    name: tg-userbot
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py

@@ -7,18 +7,15 @@ import random
 OWNER_IDS = [1598576202, 6518065496]
 
 # ============================================================
-#   TELEGRAM CREDENTIALS (set in Render ENV)
+#   TELEGRAM CREDENTIALS
 # ============================================================
 API_ID       = int(os.environ.get("API_ID", "0"))
 API_HASH     = os.environ.get("API_HASH", "")
-PHONE_NUMBER = os.environ.get("PHONE_NUMBER", "")   # e.g. +923001234567
-BOT_TOKEN    = os.environ.get("BOT_TOKEN", "")       # Control bot token
+PHONE_NUMBER = os.environ.get("PHONE_NUMBER", "")
+BOT_TOKEN    = os.environ.get("BOT_TOKEN", "")
 
 # ============================================================
 #   SESSION ENCRYPTION
-#   Generate key once:
-#     python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-#   Paste output into Render ENV as ENCRYPTION_KEY
 # ============================================================
 ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "")
 
@@ -34,31 +31,27 @@ SAMBANOVA_API_KEY = os.environ.get("SAMBANOVA_API_KEY", "")
 GROQ_API_KEY      = os.environ.get("GROQ_API_KEY", "")
 NVIDIA_API_KEY    = os.environ.get("NVIDIA_API_KEY", "")
 
-# ── Model Options ─────────────────────────────────────────────
-# Groq Models
-GROQ_MODEL_70B  = "llama-3.3-70b-versatile"       # ⚡ Groq — Llama 3.3 70B
-GROQ_MODEL_8B   = "llama-3.1-8b-instant"           # ⚡ Groq — Llama 3.1 8B 🚀
-# SambaNova Models
-SAMBANOVA_MODEL = "Meta-Llama-3.3-70B-Instruct"   # 🚀 SambaNova — Llama 3.3 70B
-# NVIDIA NIM Models
-NVIDIA_MODEL_70B     = "meta/llama-3.3-70b-instruct"   # 🟢 NVIDIA NIM — Llama 3.3 70B
-NVIDIA_MODEL_MAVERICK = "meta/llama-4-maverick-17b-128e-instruct"  # 🟢 NVIDIA NIM — Llama 4 Maverick 🔥
+# ── Model strings ─────────────────────────────────────────────
+GROQ_MODEL_70B        = "llama-3.3-70b-versatile"
+GROQ_MODEL_8B         = "llama-3.1-8b-instant"
+SAMBANOVA_MODEL       = "Meta-Llama-3.3-70B-Instruct"
+NVIDIA_MODEL_70B      = "meta/llama-3.3-70b-instruct"
+NVIDIA_MODEL_MAVERICK = "meta/llama-4-maverick-17b-128e-instruct"
 
-# Legacy aliases (used internally)
+# Legacy alias
 GROQ_MODEL = GROQ_MODEL_70B
 
-# ── Available Model Buttons (shown only if API key set) ──────
-def get_available_models() -> list[dict]:
-    """Returns model options based on which API keys are set in ENV."""
+# ── Available models (only those with API key set) ────────────
+def get_available_models() -> list:
     models = []
     if GROQ_API_KEY:
-        models.append({"id": "groq_70b",   "label": "⚡ Groq — Llama 3.3 70B",    "provider": "groq",      "model": GROQ_MODEL_70B})
-        models.append({"id": "groq_8b",    "label": "⚡ Groq — Llama 3.1 8B 🚀",  "provider": "groq",      "model": GROQ_MODEL_8B})
+        models.append({"id": "groq_70b",        "label": "⚡ Groq — Llama 3.3 70B",           "provider": "groq",      "model": GROQ_MODEL_70B})
+        models.append({"id": "groq_8b",         "label": "⚡ Groq — Llama 3.1 8B 🚀",         "provider": "groq",      "model": GROQ_MODEL_8B})
     if SAMBANOVA_API_KEY:
-        models.append({"id": "sambanova",  "label": "🚀 SambaNova — Llama 3.3 70B", "provider": "sambanova", "model": SAMBANOVA_MODEL})
+        models.append({"id": "sambanova",       "label": "🚀 SambaNova — Llama 3.3 70B",       "provider": "sambanova", "model": SAMBANOVA_MODEL})
     if NVIDIA_API_KEY:
-        models.append({"id": "nvidia_70b",     "label": "🟢 NVIDIA NIM — Llama 3.3 70B",      "provider": "nvidia", "model": NVIDIA_MODEL_70B})
-        models.append({"id": "nvidia_maverick","label": "🟢 NVIDIA NIM — Llama 4 Maverick 🔥", "provider": "nvidia", "model": NVIDIA_MODEL_MAVERICK})
+        models.append({"id": "nvidia_70b",      "label": "🟢 NVIDIA NIM — Llama 3.3 70B",      "provider": "nvidia",    "model": NVIDIA_MODEL_70B})
+        models.append({"id": "nvidia_maverick", "label": "🟢 NVIDIA NIM — Llama 4 Maverick 🔥", "provider": "nvidia",    "model": NVIDIA_MODEL_MAVERICK})
     return models
 
 # ============================================================
@@ -75,7 +68,7 @@ TYPING_SPEED    = 0.04
 MAX_TYPING_TIME = 6.0
 
 # ============================================================
-#   DEFAULT AI PERSONALITY  (Grok-style)
+#   DEFAULT AI PERSONALITY
 # ============================================================
 DEFAULT_PROMPT = """You are an AI assistant responding on behalf of the account owner on Telegram.
 
