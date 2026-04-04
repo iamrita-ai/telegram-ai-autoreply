@@ -1,15 +1,20 @@
 """
-bot_handler.py — Telegram Control Bot with inline model selector
+bot_handler.py — Telegram Control Bot
+Fixes:
+  - OTP expire: reuse same TelegramClient across login steps (stored in-memory dict)
+  - Phone: auto-add country code if missing (uses phonenumbers lib)
+  - Sessions: per-user isolation — 2 accounts never conflict
+  - Model: inline buttons, only shows keys that are set in ENV
 """
 import re
 import asyncio
 from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
-from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
+from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError
 
 from config import API_ID, API_HASH, OWNER_IDS, get_available_models
 from database.mongo import (
-    save_session, load_session, delete_session,
+    save_session, load_session, delete_session, load_all_sessions,
     set_setting, get_setting, is_locked, get_prompt,
     get_stat, blacklist_user, unblacklist_user,
     whitelist_user, unwhitelist_user, clear_history,
@@ -17,8 +22,13 @@ from database.mongo import (
     set_login_state, get_login_state,
 )
 
+# ── In-memory: keep TelegramClient alive across OTP steps ─────
+# Key: sender_id  →  TelegramClient (not disconnected between steps)
+_pending_clients: dict = {}
+
 _user_client_ref      = []
 _start_user_client_fn = None
+
 
 def set_user_client(client):
     if _user_client_ref: _user_client_ref[0] = client
@@ -36,113 +46,231 @@ def _clean_otp(raw: str) -> str:
 async def _reply(event, text: str, buttons=None):
     await event.respond(text, parse_mode="markdown", buttons=buttons)
 
+def _normalize_phone(raw: str) -> str:
+    """
+    Accept phone with or without country code.
+    - +923001234567  → +923001234567  (already correct)
+    - 923001234567   → +923001234567  (add +)
+    - 03001234567    → +923001234567  (Pakistani local → international)
+    - 3001234567     → +923001234567  (missing leading 0)
+    Falls back to adding '+' prefix if phonenumbers lib not available.
+    """
+    raw = raw.strip().replace(" ", "").replace("-", "")
+    try:
+        import phonenumbers
+        # Try parsing as-is first
+        try:
+            p = phonenumbers.parse(raw if raw.startswith("+") else f"+{raw}")
+            if phonenumbers.is_valid_number(p):
+                return phonenumbers.format_number(p, phonenumbers.PhoneNumberFormat.E164)
+        except Exception:
+            pass
+        # Try as Pakistani number (default region PK)
+        try:
+            p = phonenumbers.parse(raw, "PK")
+            if phonenumbers.is_valid_number(p):
+                return phonenumbers.format_number(p, phonenumbers.PhoneNumberFormat.E164)
+        except Exception:
+            pass
+    except ImportError:
+        pass
+    # Simple fallback: just ensure + prefix
+    if not raw.startswith("+"):
+        return f"+{raw}"
+    return raw
+
+
 def _build_model_buttons():
     available = get_available_models()
     if not available:
         return None
     return [[Button.inline(m["label"], data=f"model:{m['id']}")] for m in available]
 
+
 def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
     global _start_user_client_fn
     _start_user_client_fn = start_user_client_fn
 
+    # ── /start ─────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/start$"))
     async def cmd_start(event):
         if not _is_owner(event): return
-        session = await load_session()
-        status  = "🟢 Logged in" if session else "🔴 Not logged in — send /login"
+        sessions = await load_all_sessions()
+        if sessions:
+            accs = len(sessions)
+            status = f"🟢 {accs} account(s) logged in"
+        else:
+            session = await load_session()
+            status  = "🟢 Logged in" if session else "🔴 Not logged in — send /login"
         await _reply(event,
             f"🤖 **Userbot Control Panel**\n"
             f"━━━━━━━━━━━━━━━━━\n"
-            f"Account: {status}\n\n"
+            f"Status: {status}\n\n"
             f"Send /help for all commands.")
 
+    # ── /login ─────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/login$"))
     async def cmd_login(event):
         if not _is_owner(event): return
-        if await load_session():
-            await _reply(event, "✅ Already logged in! Use /logout first to switch.")
-            return
+        # Clean up any pending client for this user
+        old = _pending_clients.pop(event.sender_id, None)
+        if old:
+            try: await old.disconnect()
+            except Exception: pass
         await set_login_state({"step": "awaiting_phone"})
-        await _reply(event, "📱 Send your **phone number** with country code:\nExample: `+923001234567`")
+        await _reply(event,
+            "📱 **Login — Step 1/3**\n\n"
+            "Send your phone number:\n"
+            "✅ With country code: `+923001234567`\n"
+            "✅ Without country code: `03001234567`\n"
+            "✅ International: `923001234567`")
 
+    # ── Catch-all for login multi-step ─────────────────────────
     @bot.on(events.NewMessage())
     async def handle_login_input(event):
         if not _is_owner(event): return
         if not event.text: return
         if event.text.startswith("/"): return
+
         state = await get_login_state()
         if not state: return
         step = state.get("step")
 
+        # ── Step 1: Phone ───────────────────────────────────────
         if step == "awaiting_phone":
-            phone = event.text.strip()
-            if not phone.startswith("+"):
-                await _reply(event, "❗ Include country code. Example: `+923001234567`")
-                return
-            try:
-                tmp = TelegramClient(StringSession(), API_ID, API_HASH)
-                await tmp.connect()
-                result = await tmp.send_code_request(phone)
-                await set_login_state({"step": "awaiting_otp", "phone": phone, "phone_code_hash": result.phone_code_hash})
-                await tmp.disconnect()
-                await _reply(event, f"✅ OTP sent to `{phone}`\n\nSend the OTP here.\n_(Spaces allowed — e.g. `5 7 2 0 0 2`)_")
-            except Exception as e:
-                await set_login_state(None)
-                await _reply(event, f"❌ Error sending OTP: `{e}`\nTry /login again.")
+            raw_phone = event.text.strip()
+            phone     = _normalize_phone(raw_phone)
 
-        elif step == "awaiting_otp":
-            otp   = _clean_otp(event.text.strip())
-            phone = state.get("phone")
-            if len(otp) < 5:
-                await _reply(event, "❗ Invalid OTP. Try again.")
-                return
+            await _reply(event, f"📞 Using number: `{phone}`\n⏳ Sending OTP...")
+
+            # Create a NEW TelegramClient and keep it ALIVE (do NOT disconnect)
             tmp = TelegramClient(StringSession(), API_ID, API_HASH)
             try:
                 await tmp.connect()
-                await tmp.sign_in(phone, otp, phone_code_hash=state["phone_code_hash"])
-                sess = tmp.session.save()
-                await save_session(sess)
+                result = await tmp.send_code_request(phone)
+                # Store the live client so sign_in reuses same connection & session
+                _pending_clients[event.sender_id] = tmp
+                await set_login_state({
+                    "step":            "awaiting_otp",
+                    "phone":           phone,
+                    "phone_code_hash": result.phone_code_hash,
+                })
+                await _reply(event,
+                    f"✅ **OTP sent to** `{phone}`\n\n"
+                    f"📩 **Step 2/3** — Send the OTP code\n"
+                    f"_(Spaces OK — e.g. `5 7 2 0 0 2`)_\n\n"
+                    f"⚠️ Enter OTP within **2 minutes** to avoid expiry")
+            except FloodWaitError as e:
+                await tmp.disconnect()
                 await set_login_state(None)
+                await _reply(event, f"⏳ **Flood wait!** Try again after `{e.seconds}` seconds.")
+            except Exception as e:
                 await tmp.disconnect()
-                await _reply(event, "✅ **Logged in!** Session encrypted & saved 🔐")
-                await _boot_user_client(event)
+                await set_login_state(None)
+                await _reply(event, f"❌ Error sending OTP: `{e}`\n\nSend /login to retry.")
+
+        # ── Step 2: OTP ─────────────────────────────────────────
+        elif step == "awaiting_otp":
+            otp   = _clean_otp(event.text.strip())
+            phone = state.get("phone")
+
+            if len(otp) < 5:
+                await _reply(event, "❗ OTP too short. Try again (e.g. `572002`):")
+                return
+
+            # Reuse the SAME client that sent the code (avoids "code expired")
+            tmp = _pending_clients.get(event.sender_id)
+            if not tmp or not tmp.is_connected():
+                # Client lost (restart/timeout) — tell user to re-login
+                await set_login_state(None)
+                _pending_clients.pop(event.sender_id, None)
+                await _reply(event,
+                    "⚠️ **Session expired** (bot restarted or took too long).\n\n"
+                    "Send /login to start fresh.")
+                return
+
+            try:
+                await tmp.sign_in(phone, otp, phone_code_hash=state["phone_code_hash"])
+                me   = await tmp.get_me()
+                sess = tmp.session.save()
+                # Save session per user_id — no conflict between accounts
+                await save_session(sess, user_id=me.id)
+                await set_login_state(None)
+                _pending_clients.pop(event.sender_id, None)
+                # Keep client connected — hand off to userbot
+                await _reply(event,
+                    f"✅ **Logged in as {me.first_name}!**\n"
+                    f"🆔 ID: `{me.id}`\n"
+                    f"📱 @{me.username or 'no username'}\n\n"
+                    f"🔐 Session encrypted & saved!")
+                await _boot_user_client(event, existing_client=tmp, me=me)
+
             except SessionPasswordNeededError:
+                # Save partial session for 2FA step
                 sess_so_far = tmp.session.save()
-                await tmp.disconnect()
-                await set_login_state({"step": "awaiting_2fa", "phone": phone, "session_so_far": sess_so_far})
-                await _reply(event, "🔐 **2FA enabled.** Send your Telegram password:")
+                # Keep client alive for 2FA
+                await set_login_state({
+                    "step":           "awaiting_2fa",
+                    "phone":          phone,
+                    "session_so_far": sess_so_far,
+                })
+                await _reply(event,
+                    "🔐 **2FA Enabled — Step 3/3**\n\n"
+                    "Send your **Telegram cloud password**:")
+
             except PhoneCodeInvalidError:
                 await set_login_state(None)
-                await _reply(event, "❌ Wrong OTP! Send /login to start over.")
+                _pending_clients.pop(event.sender_id, None)
+                try: await tmp.disconnect()
+                except Exception: pass
+                await _reply(event, "❌ **Wrong OTP!** Send /login to start over.")
+
             except Exception as e:
                 await set_login_state(None)
-                await _reply(event, f"❌ Error: `{e}`\nSend /login to retry.")
+                _pending_clients.pop(event.sender_id, None)
+                try: await tmp.disconnect()
+                except Exception: pass
+                await _reply(event, f"❌ Error: `{e}`\n\nSend /login to retry.")
 
+        # ── Step 3: 2FA ─────────────────────────────────────────
         elif step == "awaiting_2fa":
             password = event.text.strip()
-            try:
-                tmp = TelegramClient(StringSession(state.get("session_so_far", "")), API_ID, API_HASH)
+            # Reuse same pending client
+            tmp = _pending_clients.get(event.sender_id)
+            if not tmp or not tmp.is_connected():
+                # Rebuild from saved session
+                sess_so_far = state.get("session_so_far", "")
+                tmp = TelegramClient(StringSession(sess_so_far), API_ID, API_HASH)
                 await tmp.connect()
+                _pending_clients[event.sender_id] = tmp
+
+            try:
                 await tmp.sign_in(password=password)
+                me   = await tmp.get_me()
                 sess = tmp.session.save()
-                await save_session(sess)
+                await save_session(sess, user_id=me.id)
                 await set_login_state(None)
-                await tmp.disconnect()
-                await _reply(event, "✅ **2FA verified! Logged in.** Session saved 🔐")
-                await _boot_user_client(event)
+                _pending_clients.pop(event.sender_id, None)
+                await _reply(event,
+                    f"✅ **2FA verified! Logged in as {me.first_name}**\n"
+                    f"🔐 Session encrypted & saved!")
+                await _boot_user_client(event, existing_client=tmp, me=me)
             except Exception as e:
                 await set_login_state(None)
-                await _reply(event, f"❌ Wrong password: `{e}`\nSend /login again.")
+                _pending_clients.pop(event.sender_id, None)
+                try: await tmp.disconnect()
+                except Exception: pass
+                await _reply(event, f"❌ Wrong password: `{e}`\n\nSend /login again.")
 
-    async def _boot_user_client(event):
+    async def _boot_user_client(event, existing_client=None, me=None):
         try:
             await _reply(event, "⏳ Starting userbot...")
-            await _start_user_client_fn()
+            await _start_user_client_fn(existing_client=existing_client, me=me)
             await _reply(event, "🚀 **Userbot is now running!**")
         except Exception as e:
             await _reply(event, f"⚠️ Start error: `{e}`")
 
+    # ── /logout ────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/logout$"))
     async def cmd_logout(event):
         if not _is_owner(event): return
@@ -153,6 +281,7 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
         await delete_session()
         await _reply(event, "👋 **Logged out.** Session deleted.")
 
+    # ── /lock / /unlock ────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/lock$"))
     async def cmd_lock(event):
         if not _is_owner(event): return
@@ -165,30 +294,33 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
         await set_setting("locked", False)
         await _reply(event, "🔓 **Unlocked!** Auto-replies active.")
 
+    # ── /status ────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/status$"))
     async def cmd_status(event):
         if not _is_owner(event): return
-        locked  = await is_locked()
-        prompt  = await get_prompt()
-        model   = await get_setting("preferred_model", "sambanova")
-        dnd     = await get_dnd()
-        total   = await get_stat("total_replies")
-        today   = await get_stat("today_replies")
-        session = await load_session()
-        available   = get_available_models()
-        model_label = next((m["label"] for m in available if m["id"] == model), model)
+        locked    = await is_locked()
+        prompt    = await get_prompt()
+        model     = await get_setting("preferred_model", "sambanova")
+        dnd       = await get_dnd()
+        total     = await get_stat("total_replies")
+        today     = await get_stat("today_replies")
+        sessions  = await load_all_sessions()
+        n_accs    = len(sessions) if sessions else (1 if await load_session() else 0)
+        available = get_available_models()
+        cur_label = next((m["label"] for m in available if m["id"] == model), model)
         await _reply(event,
             f"⚡ **Status**\n"
             f"━━━━━━━━━━━━━━━━━\n"
-            f"🔑 **Logged in:** {'Yes ✅' if session else 'No ❌'}\n"
+            f"🔑 **Accounts:** {n_accs} logged in\n"
             f"🔒 **Lock:** {'Locked 🔴' if locked else 'Active 🟢'}\n"
-            f"🤖 **Model:** {model_label}\n"
+            f"🤖 **Model:** {cur_label}\n"
             f"💬 **Total Replies:** {total}\n"
             f"📅 **Today:** {today}\n"
             f"😴 **DND:** {dnd or 'Off'}\n"
             f"📝 **Prompt:** {'Custom ✅' if prompt else 'Default'}\n"
             f"━━━━━━━━━━━━━━━━━")
 
+    # ── /stats ─────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/stats$"))
     async def cmd_stats(event):
         if not _is_owner(event): return
@@ -196,6 +328,7 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
         today = await get_stat("today_replies")
         await _reply(event, f"📊 **Stats**\n💬 Total: `{total}`\n📅 Today: `{today}`")
 
+    # ── /prompt ────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/prompt (.+)"))
     async def cmd_prompt(event):
         if not _is_owner(event): return
@@ -215,6 +348,7 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
         p = await get_prompt()
         await _reply(event, f"📝 **Current Prompt:**\n\n{p or '_Default_'}")
 
+    # ── Blacklist / Whitelist ──────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/blacklist (\d+)$"))
     async def cmd_blacklist(event):
         if not _is_owner(event): return
@@ -246,6 +380,7 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
         await clear_history(int(event.pattern_match.group(1)))
         await _reply(event, "🗑️ History cleared!")
 
+    # ── /delay ─────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/delay (\d+\.?\d*)$"))
     async def cmd_delay(event):
         if not _is_owner(event): return
@@ -264,9 +399,9 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
                 "Set at least one in Render ENV:\n"
                 "`GROQ_API_KEY` / `SAMBANOVA_API_KEY` / `NVIDIA_API_KEY`")
             return
-        current     = await get_setting("preferred_model", "sambanova")
-        available   = get_available_models()
-        cur_label   = next((m["label"] for m in available if m["id"] == current), current)
+        current   = await get_setting("preferred_model", "sambanova")
+        available = get_available_models()
+        cur_label = next((m["label"] for m in available if m["id"] == current), current)
         await _reply(event,
             f"🤖 **Select AI Model**\n"
             f"━━━━━━━━━━━━━━━━━\n"
@@ -285,7 +420,7 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
             await event.answer("❌ Model unavailable. Check API key.", alert=True)
             return
         await set_setting("preferred_model", model_id)
-        await event.answer(f"✅ Switched!", alert=False)
+        await event.answer("✅ Switched!", alert=False)
         await event.edit(
             f"✅ **Model Updated!**\n"
             f"━━━━━━━━━━━━━━━━━\n"
@@ -293,6 +428,7 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
             f"_Use /model to switch again._",
             parse_mode="markdown")
 
+    # ── /dnd ───────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/dnd (.+)$"))
     async def cmd_dnd(event):
         if not _is_owner(event): return
@@ -305,6 +441,7 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
         await set_dnd(None)
         await _reply(event, "✅ DND OFF")
 
+    # ── /schedule ──────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/schedule (\d+) (morning|afternoon|night) (\d{1,2}:\d{2})$"))
     async def cmd_schedule(event):
         if not _is_owner(event): return
@@ -320,6 +457,7 @@ def register_bot_handlers(bot: TelegramClient, start_user_client_fn):
         await remove_schedule(int(event.pattern_match.group(1)), event.pattern_match.group(2))
         await _reply(event, "❌ Schedule removed!")
 
+    # ── /help ──────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/help$"))
     async def cmd_help(event):
         if not _is_owner(event): return
