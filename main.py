@@ -215,7 +215,7 @@ async def start_user_client(
                 "⚠️ A saved login was corrupted and has been removed. Send /login to sign in again.",
             )
             continue
-        outcome = await _launch(client)
+        outcome = await _launch(client, owner_id)
         if outcome == "ok":
             continue
         with contextlib.suppress(Exception):

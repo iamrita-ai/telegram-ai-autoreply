@@ -8,7 +8,7 @@ schedule would quietly appear in your account.
 from __future__ import annotations
 
 import inspect
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -341,3 +341,105 @@ def test_new_users_are_registered_by_the_decorator() -> None:
     source = Path("handlers/control.py").read_text()
     start = source.index("def _registered")
     assert "register_user" in source[start : start + 700]
+
+
+# ── real call paths, not mocked ones ────────────────────────────────────────
+# The multi-user refactor shipped a TypeError to production because both
+# tests patched _launch. These call the real thing.
+
+
+@pytest.mark.asyncio
+async def test_restoring_a_session_calls_launch_for_real() -> None:
+    """No patching of _launch: a wrong signature must fail here."""
+    import main
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def is_connected(self):
+            return True
+
+        async def is_user_authorized(self):
+            return False  # -> "dead" -> the session is deleted
+
+        async def disconnect(self):
+            pass
+
+    records = ([{"owner_id": 7, "account_id": 7, "session": "sess"}], [])
+    with (
+        patch.object(mongo, "load_session_records", AsyncMock(return_value=records)),
+        patch.object(mongo, "delete_session", AsyncMock()) as delete,
+        patch.object(main, "_notify", AsyncMock()),
+        patch.object(main, "TelegramClient", _FakeClient),
+        patch.object(main, "StringSession", lambda *a, **k: object()),
+    ):
+        await main.start_user_client()
+    delete.assert_awaited_once_with(7)
+
+
+@pytest.mark.asyncio
+async def test_a_live_session_is_attached_to_its_owner() -> None:
+    """The full happy path, with the real _launch and a fake Telethon client."""
+    import main
+
+    me = type("Me", (), {"id": 555, "first_name": "Rita", "username": "rita"})()
+
+    class _FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def is_connected(self):
+            return True
+
+        async def is_user_authorized(self):
+            return True
+
+        async def get_me(self):
+            return me
+
+        async def __call__(self, _request):
+            return None
+
+        def on(self, _event):
+            return lambda f: f
+
+        async def run_until_disconnected(self):
+            return None
+
+    attached: dict = {}
+    with (
+        patch.object(
+            mongo,
+            "load_session_records",
+            AsyncMock(return_value=([{"owner_id": 7, "account_id": 555, "session": "sess"}], [])),
+        ),
+        patch.object(main, "TelegramClient", _FakeClient),
+        patch.object(main, "StringSession", lambda *a, **k: object()),
+        patch.object(main.userbot, "attach", lambda c, **kw: attached.update(kw)),
+        patch.object(
+            main.control, "set_user_client", lambda c, owner: attached.update(owner=owner)
+        ),
+        patch.object(main, "_spawn", lambda coro, name="": coro.close()),
+    ):
+        await main.start_user_client()
+
+    assert attached["owner"] == 7, "the account must be attached to its owner"
+    assert attached["me_id"] == 555
+    main._clients.clear()
+
+
+def test_control_calls_start_user_client_correctly() -> None:
+    """control.py holds main.start_user_client as a callback - check the contract."""
+    import main
+
+    signature = inspect.signature(main.start_user_client)
+    # This is exactly how handlers/control.py calls it after a successful login.
+    signature.bind(existing_client=object(), me=object(), owner=1)
+
+
+def test_scheduler_and_userbot_entrypoints_take_an_owner() -> None:
+    from handlers import scheduler, userbot
+
+    inspect.signature(scheduler.run_scheduler).bind(object(), 1)
+    inspect.signature(userbot.attach).bind(object(), owner=1, me_id=2, display_name="x")

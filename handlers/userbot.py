@@ -205,8 +205,10 @@ async def _handle(client, event, *, owner: int, me_id: int, display_name: str) -
             extra_delay=decision.extra_delay,
         )
         spoken = False
-        if await voice.should_speak(reply, is_stranger=stranger):
-            spoken = await voice.send_as_voice(client, event.chat_id, reply, reply_to=event.id)
+        if await voice.should_speak(owner, reply, is_stranger=stranger):
+            spoken = await voice.send_as_voice(
+                owner, client, event.chat_id, reply, reply_to=event.id
+            )
         if not spoken:
             await event.reply(reply)
 

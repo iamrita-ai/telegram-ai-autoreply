@@ -363,7 +363,7 @@ handlers/
 database/mongo.py       storage, encryption, retention, per-user scoping
 assets/                 profile picture and /start banner
 scripts/                offline rich-message preview renderer
-tests/                  185 tests, no network required
+tests/                  205 tests, no network required
 ```
 
 ---
@@ -372,9 +372,14 @@ tests/                  185 tests, no network required
 
 ```bash
 pip install -r requirements.txt pytest pytest-asyncio ruff
-python -m pytest -q      # 185 tests, all offline
+python -m pytest -q      # 205 tests, all offline
 ruff check . && ruff format --check .
 ```
+
+`tests/test_call_signatures.py` walks the AST of every module and binds each
+cross-module call against the real signature. Mocks accept any arguments, so
+unit tests cannot catch a call site that was missed during a refactor - this
+does.
 
 CI runs the same three checks — lint, tests on 3.11 and 3.12, and a Docker build — on every push.
 
