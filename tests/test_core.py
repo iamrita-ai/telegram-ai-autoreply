@@ -50,11 +50,34 @@ def test_owner_ids_parse_from_a_comma_list(monkeypatch) -> None:
     assert not settings.is_owner(999)
 
 
-def test_owner_ids_are_not_hardcoded() -> None:
-    """Two user ids used to be baked into config.py."""
-    source = (__import__("pathlib").Path(__file__).parent.parent / "config.py").read_text()
-    assert "1598576202" not in source
-    assert "6518065496" not in source
+def test_no_telegram_id_is_hardcoded_anywhere() -> None:
+    """Two real user ids used to be baked into config.py.
+
+    The check is written generically on purpose. Naming the ids here would
+    only move somebody's account number from one file in the repository to
+    another, so instead nothing in the source may contain a bare run of
+    nine or more digits, which is what a Telegram user id looks like.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).parent.parent
+    id_shaped = re.compile(r"(?<![\d.])\d{9,}(?![\d.])")
+    allowed = {
+        # Documented placeholders used in help text and examples.
+        "1000000000",
+        "9876543210",
+        "919876543210",
+        "09876543210",
+        # Telegram's own service accounts, public constants, not people.
+        "1087968824",  # GroupAnonymousBot
+        "136817688",  # Channel_Bot
+    }
+    for path in sorted(root.rglob("*.py")):
+        if ".git" in path.parts or "tests" in path.parts:
+            continue
+        for found in id_shaped.findall(path.read_text(encoding="utf-8")):
+            assert found in allowed, f"{path} has what looks like a real id: {found}"
 
 
 def test_an_unknown_timezone_falls_back_to_utc(monkeypatch) -> None:
