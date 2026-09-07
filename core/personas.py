@@ -39,12 +39,21 @@ class Persona:
     label: str
     description: str
     prompt: str
+    #: One line describing the tone, layered on top of a custom prompt.
+    #: Without this, choosing a persona did nothing at all for anybody who
+    #: had written their own prompt, because the custom prompt replaced the
+    #: persona outright.
+    mode: str = ""
 
 
 PROFESSIONAL = Persona(
     key="professional",
     label="💼 Professional",
     description="Polite, concise, business-appropriate.",
+    mode=(
+        "Professional: clear, mature and precise. Courteous and to the "
+        "point, no slang, no more than one exclamation mark."
+    ),
     prompt=(
         "You are the person who owns this Telegram account, replying to a "
         "message while away from your desk. Your tone is professional, warm "
@@ -59,6 +68,10 @@ CASUAL = Persona(
     key="casual",
     label="😄 Casual",
     description="Relaxed and friendly, like texting a mate.",
+    mode=(
+        "Casual: relaxed, warm and a little playful, the way people "
+        "actually text. Contractions, short sentences, light humour."
+    ),
     prompt=(
         "You are the person who owns this Telegram account, texting a friend. "
         "Your tone is relaxed, warm and a little playful - the way people "
@@ -73,6 +86,10 @@ ROMANTIC = Persona(
     key="romantic",
     label="💗 Romantic",
     description="Warm, affectionate and emotionally close.",
+    mode=(
+        "Romantic: warm, affectionate and charming. Emotionally present, "
+        "playful and tender, close without being heavy."
+    ),
     prompt=(
         "You are the person who owns this Telegram account, texting someone "
         "you are close to and care about deeply. Your tone is affectionate, "
@@ -107,14 +124,30 @@ def build_system_prompt(
 ) -> str:
     """The system prompt for one reply.
 
-    A custom prompt wins outright - the owner asked for it explicitly - but
-    the shared rules are still appended so a one-line custom prompt cannot
-    accidentally produce essay-length replies that reveal the automation.
-    """
-    if custom_prompt and custom_prompt.strip():
-        return f"{custom_prompt.strip()}\n{_SHARED_RULES}"
+    A custom prompt defines *who* the account is. The persona defines *how*
+    it currently speaks. They are composed rather than one replacing the
+    other, because the old behaviour ("custom prompt wins outright") meant
+    that anybody with a custom prompt could pick Romantic, Casual or
+    Professional all day and nothing whatsoever would change. That is not a
+    preference, it is a broken switch.
 
-    prompt = get_persona(persona_key).prompt
+    The shared rules are always appended, so a one-line custom prompt cannot
+    produce essay-length replies that give the automation away.
+    """
+    persona = get_persona(persona_key)
+    if custom_prompt and custom_prompt.strip():
+        mode = persona.mode or persona.description
+        prompt = (
+            f"{custom_prompt.strip()}\n\n"
+            f"Active personality mode: {mode}\n"
+            "Stay the character described above; the mode only changes how "
+            "warm, formal or playful you sound right now."
+        )
+        if display_name:
+            prompt = f"{prompt}\nYour name is {display_name}."
+        return f"{prompt}\n{_SHARED_RULES}"
+
+    prompt = persona.prompt
     if display_name:
         prompt = f"{prompt}\nYour name is {display_name}."
     return prompt

@@ -126,6 +126,14 @@ class Settings:
     #: Ceiling for the thinking pause.
     max_thinking_time: float = field(default_factory=lambda: _env_float("MAX_THINKING_TIME", 5.0))
     reactions_enabled: bool = field(default_factory=lambda: _env_bool("REACTIONS_ENABLED", True))
+    #: Play Telegram's full-screen animation for reactions to messages that
+    #: are actually an event (good news, a milestone, real excitement).
+    big_reactions: bool = field(default_factory=lambda: _env_bool("BIG_REACTIONS", True))
+    #: Send a read receipt after replying, so the sender sees the double
+    #: tick instead of a message that was answered but still looks unread.
+    mark_as_read: bool = field(default_factory=lambda: _env_bool("MARK_AS_READ", True))
+    #: Use Bot API 10.1 rich messages for the control bot's own panels.
+    rich_messages: bool = field(default_factory=lambda: _env_bool("RICH_MESSAGES", True))
 
     # -- Safety rails -----------------------------------------------------
     #
@@ -344,6 +352,9 @@ class Settings:
                 if key
             ],
             "reactions": self.reactions_enabled,
+            "big_reactions": self.big_reactions,
+            "read_receipts": self.mark_as_read,
+            "rich_messages": self.rich_messages,
             "keepalive": bool(self.keepalive and self.keepalive_url),
             "limits": {
                 "per_chat_hourly": self.per_chat_hourly_limit,

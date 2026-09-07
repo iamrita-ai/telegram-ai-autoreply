@@ -92,11 +92,28 @@ def test_unknown_persona_falls_back_instead_of_raising() -> None:
     assert get_persona(None).key == "casual"
 
 
-def test_custom_prompt_overrides_the_persona_but_keeps_the_rules() -> None:
+def test_a_custom_prompt_and_a_persona_are_combined_not_swapped() -> None:
+    """The old behaviour made /persona a switch that did nothing.
+
+    A custom prompt replaced the persona outright, so anybody who had
+    written their own prompt could pick Romantic, Casual or Professional all
+    day and the replies never changed. The prompt says who the account is;
+    the persona says how it sounds right now. Both must reach the model.
+    """
     prompt = build_system_prompt("romantic", "You are a pirate.")
     assert "pirate" in prompt
-    assert "romantic" not in prompt.lower().split("hard rules")[0]
-    assert "English only" in prompt
+    assert "Romantic" in prompt
+    assert "English only" in prompt  # the shared rules survive as well
+
+
+def test_switching_persona_changes_the_prompt_even_with_a_custom_one() -> None:
+    custom = "You are Serena."
+    romantic = build_system_prompt("romantic", custom)
+    professional = build_system_prompt("professional", custom)
+    casual = build_system_prompt("casual", custom)
+    assert romantic != professional != casual
+    assert "affectionate" in romantic
+    assert "precise" in professional
 
 
 def test_no_persona_is_written_in_hinglish() -> None:

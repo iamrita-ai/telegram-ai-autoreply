@@ -14,7 +14,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from config import Settings
-from core.rich import RichMessage, demo_message, utf16_len
+from core.rich import RichMessage, utf16_len
 from core.safety import RateLimiter, normalise, screen_stranger_text
 from handlers import ai, scheduler
 
@@ -322,16 +322,24 @@ def test_entity_offsets_are_utf16_not_python_characters() -> None:
     assert text[entities[0].offset : entities[0].offset + entities[0].length] != "BOLD"
 
 
-def test_every_demo_entity_lands_on_real_text() -> None:
-    text, entities = demo_message().build()
+def test_every_entity_of_a_built_message_lands_on_real_text() -> None:
+    message = (
+        RichMessage()
+        .bold("Status")
+        .text_("\n")
+        .spoiler("hidden")
+        .text_(" ")
+        .quote("a quotation", expandable=True)
+    )
+    text, entities = message.build()
     assert entities
     for entity in entities:
         assert _slice_utf16(text, entity.offset, entity.length).strip()
 
 
-def test_demo_covers_spoiler_and_expandable_quote() -> None:
+def test_spoiler_and_expandable_quote_survive_the_build() -> None:
     """These two are exactly what Telethon's HTML parser cannot express."""
-    _, entities = demo_message().build()
+    _, entities = RichMessage().spoiler("shh").text_(" ").quote("long", expandable=True).build()
     names = [type(e).__name__ for e in entities]
     assert "MessageEntitySpoiler" in names
     collapsed = [

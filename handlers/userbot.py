@@ -17,8 +17,16 @@ from telethon import events
 from telethon.errors import FloodWaitError
 from telethon.tl.types import User
 
+from config import settings
 from core import voice
-from core.humanize import detect_sentiment, is_quiet_hours, send_reaction, simulate_typing
+from core.humanize import (
+    deserves_big_reaction,
+    detect_sentiment,
+    is_quiet_hours,
+    mark_as_read,
+    send_reaction,
+    simulate_typing,
+)
 from core.safety import limiter_for
 from database import mongo
 from handlers import ai
@@ -252,7 +260,10 @@ async def _handle(client, event, *, owner: int, me_id: int, display_name: str) -
             return
 
         if not is_group:
-            await send_reaction(client, event, detect_sentiment(text))
+            # A big reaction is the full-screen animation. Saved for the
+            # messages that are actually an event, never for small talk.
+            big = settings.big_reactions and not stranger and deserves_big_reaction(text)
+            await send_reaction(client, event, detect_sentiment(text), big=big)
         await simulate_typing(
             client,
             event.chat_id,
@@ -267,6 +278,10 @@ async def _handle(client, event, *, owner: int, me_id: int, display_name: str) -
             )
         if not spoken:
             await event.reply(reply)
+
+        # Read receipt last: the double tick appears when the answer does,
+        # which is what a person looks like.
+        await mark_as_read(client, event)
 
         limiter.record(event.chat_id, text=reply, is_stranger=stranger)
         await mongo.increment_stat(owner, "total_replies")
@@ -317,6 +332,7 @@ async def _answer_fragment_later(
             extra_delay=decision.extra_delay,
         )
         await event.reply(result.text)
+        await mark_as_read(client, event)
         limiter.record(event.chat_id, text=result.text, is_stranger=stranger)
         await mongo.increment_stat(owner, "total_replies")
         await mongo.increment_today(owner)

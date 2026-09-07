@@ -48,6 +48,7 @@ __all__ = [
     "disconnect",
     "get_conversation",
     "get_dnd",
+    "get_guard",
     "get_pending",
     "get_prompt",
     "get_setting",
@@ -57,11 +58,13 @@ __all__ = [
     "is_group_allowed",
     "is_locked",
     "list_allowed_groups",
+    "list_guards",
     "load_all_sessions",
     "load_session",
     "migrate_to_multi_user",
     "register_user",
     "save_session",
+    "set_guard",
     "set_setting",
     "set_user_setting",
 ]
@@ -479,6 +482,32 @@ async def clear_all_pending(owner: int) -> int:
     """Drop every held fragment for one owner. Used by /clearcache."""
     result = await _collection("pending").delete_many({"owner_id": int(owner)})
     return result.deleted_count
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  Guardian: join request policy per group
+# ──────────────────────────────────────────────────────────────────────────
+async def set_guard(chat_id: int, mode: str, owner: int) -> None:
+    """Remember how one group's join requests should be handled."""
+    await _collection("guards").update_one(
+        {"chat_id": int(chat_id)},
+        {"$set": {"mode": mode, "owner_id": int(owner), "updated_at": _now()}},
+        upsert=True,
+    )
+
+
+async def get_guard(chat_id: int) -> dict | None:
+    return await _collection("guards").find_one({"chat_id": int(chat_id)})
+
+
+async def list_guards(owner: int) -> list[dict]:
+    cursor = _collection("guards").find({"owner_id": int(owner)})
+    return [row async for row in cursor]
+
+
+async def delete_guard(chat_id: int) -> bool:
+    result = await _collection("guards").delete_one({"chat_id": int(chat_id)})
+    return bool(result.deleted_count)
 
 
 # ──────────────────────────────────────────────────────────────────────────

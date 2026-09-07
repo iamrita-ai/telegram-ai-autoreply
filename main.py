@@ -25,10 +25,10 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.account import UpdateStatusRequest
 
 from config import ConfigError, settings
-from core import safety
+from core import botapi, safety
 from core.logging_setup import setup_logging
 from database import mongo
-from handlers import control, scheduler, userbot
+from handlers import control, guardian, scheduler, userbot
 
 log = logging.getLogger("autoreply")
 
@@ -323,6 +323,8 @@ async def _shutdown(bot: TelegramClient, runner: web.AppRunner) -> None:
     with contextlib.suppress(Exception):
         await bot.disconnect()
     with contextlib.suppress(Exception):
+        await botapi.close()
+    with contextlib.suppress(Exception):
         await runner.cleanup()
     await mongo.disconnect()
     log.info("bye")
@@ -360,6 +362,9 @@ async def main() -> None:
 
     userbot.set_notifier(_notify)
     control.register(bot, start_user_client)
+    # Join request screening. Only ever acts on groups somebody has turned
+    # on with /guard, so attaching it is free.
+    guardian.register(bot)
     # The command menu next to the message box, so nothing has to be typed
     # from memory. Never fatal: a menu is a convenience.
     with contextlib.suppress(Exception):

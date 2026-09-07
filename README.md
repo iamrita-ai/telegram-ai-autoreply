@@ -187,8 +187,16 @@ ask before they act.
 ### Rich messages
 | Command | Description |
 |---|---|
-| `/rich` | Send the formatted sample to yourself, from the control bot |
-| `/rich <id>` | Send the same sample **from your own account** to that chat |
+| `/rich` | Show whether rich panels are on, as a rich panel |
+| `/rich on` · `/rich off` | Turn Bot API 10.1 formatting on and off for your panels |
+
+### Groups you guard
+| Command | Description |
+|---|---|
+| `/guard` | List the groups whose join requests you screen |
+| `/guard <group id> auto` | Screen every requester, approve real accounts |
+| `/guard <group id> captcha` | Screen, then ask the person to tap the right button |
+| `/guard <group id> off` | Hand join requests back to a human |
 
 ### Privacy
 | Command | Description |
@@ -226,7 +234,7 @@ you   Speak like a real Gen-Z internet user: u, ur, btw, rn, ngl, fr.
 bot   Part 2 added, 124 characters so far.
 you   Never be a yes-man. If the user is wrong, say so.
 you   done
-bot   Prompt saved, 174 characters from 3 messages. It overrides the persona.
+bot   Prompt saved, 174 characters from 3 messages.
 ```
 
 The pieces are joined in order, one per line, up to 8000 characters. A **Save
@@ -234,9 +242,13 @@ now** button does the same as typing `done`, and `/cancel` throws the draft
 away without touching the prompt you already had. Nothing is saved until you
 finish, so an abandoned draft cannot half-replace a working personality.
 
-Your prompt overrides the persona completely, but the house rules below are
-still appended to it, so a custom personality cannot accidentally start writing
-essays or announcing that it is an AI.
+Your prompt and your persona are **combined**, not swapped. The prompt says who
+the account is; the persona says how warm, formal or playful it sounds right
+now. Both reach the model, along with the house rules below, so a custom
+personality cannot start writing essays or announcing that it is an AI, and
+`/persona` keeps working after you have written your own prompt. That last part
+used to be broken: a saved prompt won outright, so switching persona changed
+nothing at all for anybody who had written one.
 
 ---
 
@@ -257,21 +269,33 @@ bot's own panels are held to the same standard by a test.
 
 ## Rich messages
 
-Replies are plain text on purpose - formatted small talk looks synthetic. But
-the control bot, the `/start` screen and anything you send deliberately can use
-Telegram's full formatting, built in [`core/rich.py`](core/rich.py):
+Auto-replies are plain text on purpose. A formatted document arriving in a DM
+does not read like a person typing. The bot's **own panels** are a different
+matter, and they use both formatting systems Telegram offers.
 
-**bold**, *italic*, underline, ~~strikethrough~~, `inline code`, syntax-highlighted
-code blocks, real hyperlinks, tap-to-reveal **spoilers**, ordinary blockquotes and
-**expandable** blockquotes that start collapsed.
+**Bot API 10.1 rich blocks** ([`core/blocks.py`](core/blocks.py), sent through
+[`core/botapi.py`](core/botapi.py)) give real structure: headings, dividers,
+bordered and striped tables, task lists with checkboxes, collapsible details,
+pull quotes, footers, code blocks and tappable commands. `/status` is a table,
+`/limits` is a task list, `/help` is a set of headed command lists, and
+`/persona` shows the mode you are already using as a **disabled button**, which
+is the 24 August 2026 addition to the Bot API.
 
-Send `/rich` to see all of it in one message, or `/rich <user id>` to have it
-arrive **from your own account**, exactly as a contact would receive it. There is
-also an offline preview:
+**Entity formatting** ([`core/rich.py`](core/rich.py)) is the fallback, and the
+only option from your own account, because that side speaks MTProto: bold,
+italic, underline, strikethrough, inline code, code blocks, links,
+tap-to-reveal spoilers and expandable blockquotes.
 
-```bash
-python scripts/render_rich_preview.py docs/rich-preview.html
-```
+### Trying it
+
+Send `/status`, `/limits`, `/help` or `/persona` to the control bot. Those are
+real rich messages rather than a demo: if your Telegram server supports Bot API
+10.1 you get the structured version, and `/rich off` puts them back to ordinary
+markdown so you can compare the two.
+
+Nothing is ever lost to formatting. If `sendRichMessage` is missing, refused, or
+the network fails, the same panel is sent as plain markdown instead, and a
+missing method is remembered so the next panel does not pay for the round trip.
 
 Two details worth knowing if you extend it:
 
@@ -280,6 +304,25 @@ Two details worth knowing if you extend it:
 - Entity offsets are counted in **UTF-16 code units, not Python characters**.
   One emoji outside the basic plane shifts every entity after it by one. The
   builder counts correctly, so emoji are safe anywhere in the text.
+
+---
+
+## Guarding a group
+
+Bot API 10.1 also introduced guardian bots. If you run a group with **Approve
+new members** turned on, add the control bot there as an admin who can add
+members, then send `/guard <group id> captcha`. Only an admin of that group can
+set this, and the bot verifies that before it agrees.
+
+Every requester is screened first: bots, deleted accounts, accounts Telegram has
+flagged as scam or fake, and anybody banned from this bot are declined without
+ceremony. Everybody else gets a private message with four emoji and is asked to
+tap one. The right button lets them in, the wrong one declines them, and silence
+leaves the request in the queue for you, because a slow human is not a spammer.
+`auto` mode skips the captcha and approves anybody who passes the screen.
+
+If the requester has never started the bot it cannot message them, so the
+request waits for you and you are told why.
 
 ---
 
@@ -350,6 +393,17 @@ The defaults are conservative on purpose. Every one is tunable in [`.env.example
 another's limits, and two users talking to the same contact are tracked
 separately.
 
+### Read receipts come after the answer, not before
+
+A human opens a chat, reads, thinks, types, sends. A bot marks everything read
+the instant it arrives. The read receipt is sent **after** the humanised delay
+and after the reply, so the double tick and the answer appear together.
+
+Reactions follow the same idea. Most get the ordinary tap; the full-screen
+animation is saved for messages that are actually an occasion, such as news of a
+job, a wedding or an exam result, and never for a stranger. Turn either off with
+`BIG_REACTIONS=false` or `MARK_AS_READ=false`.
+
 ### Your contacts are not rate limited
 
 A volume cap exists so the account cannot spray messages at people who never
@@ -414,6 +468,9 @@ Every setting is an environment variable, documented in [`.env.example`](.env.ex
 | `DUPLICATE_WINDOW` | `1800` | Seconds a sent message is remembered, to avoid repeats |
 | `HISTORY_LIMIT` | `20` | Turns of context sent to the model |
 | `REACTIONS_ENABLED` | `true` | React to incoming DMs with an emoji |
+| `BIG_REACTIONS` | `true` | Play the full-screen animation, for real news only |
+| `MARK_AS_READ` | `true` | Send the read receipt after replying, never before |
+| `RICH_MESSAGES` | `true` | Allow Bot API 10.1 panels (users can still opt out) |
 | `LOG_LEVEL` | `INFO` | `DEBUG` for troubleshooting |
 
 ---
@@ -469,18 +526,20 @@ core/
 ├── personas.py         the three personalities + shared house rules
 ├── safety.py           rate limits, stranger guardian, duplicate guard
 ├── voice.py            optional voice-note replies (Orpheus TTS)
-├── rich.py             formatted-message builder (UTF-16 safe entities)
+├── rich.py             entity formatting for MTProto (UTF-16 safe)
+├── blocks.py           Bot API 10.1 rich blocks, built and validated
+├── botapi.py           small HTTP client for what MTProto cannot reach
 ├── humanize.py         typing rhythm, reactions, quiet hours
 └── logging_setup.py    structured logging
 handlers/
 ├── userbot.py          incoming message pipeline
 ├── control.py          the owner's command surface
 ├── ai.py               providers, failover, fragment buffering
+├── guardian.py         join request screening and captcha
 └── scheduler.py        daily greetings
 database/mongo.py       storage, encryption, retention, per-user scoping
 assets/                 profile picture and /start banner
-scripts/                offline rich-message preview renderer
-tests/                  306 tests, no network required
+tests/                  369 tests, no network required
 ```
 
 ---
@@ -489,7 +548,7 @@ tests/                  306 tests, no network required
 
 ```bash
 pip install -r requirements.txt pytest pytest-asyncio ruff
-python -m pytest -q      # 306 tests, all offline
+python -m pytest -q      # 369 tests, all offline
 ruff check . && ruff format --check .
 ```
 

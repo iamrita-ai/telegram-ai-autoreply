@@ -37,7 +37,7 @@ from telethon.tl.types import (
 
 log = logging.getLogger(__name__)
 
-__all__ = ["RichMessage", "demo_message", "send_rich", "utf16_len"]
+__all__ = ["RichMessage", "send_rich", "utf16_len"]
 
 
 def utf16_len(text: str) -> int:
@@ -158,54 +158,3 @@ async def send_rich(client, chat, message: RichMessage, *, file=None, reply_to=N
     except Exception as exc:  # entity errors must never cost the whole message
         log.warning("rich send failed (%s) - falling back to plain text", type(exc).__name__)
         return await client.send_message(chat, text, file=file, reply_to=reply_to, buttons=buttons)
-
-
-def demo_message(sender_name: str = "Serena") -> RichMessage:
-    """A message that exercises every supported format, for live testing."""
-    return (
-        RichMessage()
-        .bold("✨ Rich message demo")
-        .newline(2)
-        .text_("Everything below is one single message, formatted with Telegram entities.")
-        .newline(2)
-        .text_("• ")
-        .bold("bold")
-        .text_(", ")
-        .italic("italic")
-        .text_(", ")
-        .underline("underline")
-        .text_(", ")
-        .strike("strikethrough")
-        .newline()
-        .text_("• inline ")
-        .code("code_looks_like_this()")
-        .newline()
-        .text_("• a ")
-        .link("real hyperlink", "https://core.telegram.org/api/entities")
-        .text_(" with no ugly URL")
-        .newline()
-        .text_("• tap to reveal: ")
-        .spoiler("this part is hidden until you tap it")
-        .newline(2)
-        .bold("Quote")
-        .newline()
-        .quote("A normal blockquote, for when you answer a specific line.")
-        .newline(2)
-        .bold("Expandable quote")
-        .newline()
-        .quote(
-            "This one starts collapsed and expands when tapped.\n"
-            "It is the right shape for long context that should not dominate "
-            "the chat: a summary, a changelog, an itinerary, the full text of "
-            "something you are only referring to in passing.\n"
-            "Telethon's HTML parser cannot produce this - it needs a raw "
-            "MessageEntityBlockquote with collapsed=True.",
-            expandable=True,
-        )
-        .newline(2)
-        .bold("Code block")
-        .newline()
-        .pre('print("syntax highlighted")', language="python")
-        .newline()
-        .italic(f" - sent by {sender_name}")
-    )

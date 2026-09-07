@@ -28,12 +28,12 @@ from telethon.errors import (
 from telethon.sessions import StringSession
 
 from config import settings
-from core import safety, voice
+from core import blocks, botapi, safety, voice
 from core.personas import persona_choices
-from core.rich import RichMessage, demo_message, send_rich
+from core.rich import RichMessage, send_rich
 from core.safety import forget_limiter, limiter_for
 from database import mongo
-from handlers import ai
+from handlers import ai, guardian
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +69,8 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("allowgroup", "Allow auto-replies in a group"),
     ("disallowgroup", "Stop replying in a group"),
     ("groups", "List allowed groups"),
-    ("rich", "See the formatted message sample"),
+    ("rich", "Rich message formatting, on or off"),
+    ("guard", "Guard a group's join requests"),
     ("schedule", "Daily message, e.g. /schedule <id> morning 08:30"),
     ("schedules", "List scheduled messages"),
     ("forget", "Clear one chat's history"),
@@ -303,6 +304,262 @@ def limits_text(owner: int) -> str:
     )
 
 
+async def rich_enabled(owner: int) -> bool:
+    """Should this user's panels be sent as Bot API 10.1 rich messages?
+
+    Three things have to line up: the deployment allows it, the user has not
+    turned it off, and the Telegram server has not already told us the
+    method does not exist.
+    """
+    if not settings.rich_messages or not botapi.rich_supported():
+        return False
+    return bool(await mongo.get_user_setting(owner, "rich", True))
+
+
+async def send_panel(
+    bot,
+    event,
+    text: str,
+    rich: list[dict] | None = None,
+    buttons_=None,
+    *,
+    api_markup: dict | None = None,
+) -> bool:
+    """Send a panel as rich blocks, falling back to markdown.
+
+    Returns True when the rich path was used. Formatting is never allowed to
+    cost the message: any failure sends the plain version instead, and a
+    server that does not know ``sendRichMessage`` is remembered so the next
+    panel does not pay for the round trip.
+    """
+    owner = event.sender_id
+    if rich and await rich_enabled(owner):
+        markup = api_markup
+        if markup is None and buttons_ is not None:
+            markup = botapi.inline_keyboard(_to_api_keyboard(buttons_))
+        try:
+            await botapi.send_rich(event.chat_id, blocks.message(rich), reply_markup=markup)
+            return True
+        except botapi.MethodUnsupported:
+            log.info("this Telegram server has no sendRichMessage; using plain messages")
+        except botapi.BotApiError as exc:
+            log.warning("rich panel refused (%s), sending plain text", exc.description)
+        except Exception:
+            log.exception("rich panel failed, sending plain text")
+    await _say(event, text, buttons=buttons_)
+    return False
+
+
+def _to_api_keyboard(rows) -> list[list[dict]]:
+    """Convert Telethon inline buttons into Bot API JSON."""
+    out = []
+    for row in rows:
+        api_row = []
+        for item in row:
+            data = getattr(item, "data", None)
+            api_row.append(
+                {
+                    "text": getattr(item, "text", "") or "",
+                    "callback_data": data.decode() if isinstance(data, bytes) else (data or ""),
+                }
+            )
+        out.append(api_row)
+    return out
+
+
+async def status_blocks(owner: int) -> list[dict]:
+    """The status panel as Bot API 10.1 blocks: a heading and a real table."""
+    locked = await mongo.is_locked(owner)
+    persona_key = await mongo.get_persona_key(owner)
+    custom = await mongo.get_prompt(owner)
+    model = await mongo.get_user_setting(owner, "preferred_model", "auto")
+    dnd = await mongo.get_dnd(owner)
+    total = await mongo.get_stat(owner, "total_replies")
+    today = await mongo.get_today_count(owner)
+    session = await mongo.load_session(owner)
+    stats = limiter_for(owner).snapshot()
+    label = ai.PROVIDERS[model].label if model in ai.PROVIDERS else "Automatic"
+    now = dt.datetime.now(settings.tz)
+
+    def row(name: str, value) -> list[dict]:
+        return [blocks.cell(name), blocks.cell(value)]
+
+    return [
+        blocks.heading("Status", size=1),
+        blocks.table(
+            [
+                [
+                    blocks.cell(blocks.bold("Setting"), header=True),
+                    blocks.cell(blocks.bold("Now"), header=True),
+                ],
+                row("Account", "connected" if session else "not connected"),
+                row("Replies", "paused" if locked else "active"),
+                row(
+                    "Persona",
+                    blocks.seq(
+                        blocks.code(persona_key),
+                        " with your custom prompt" if custom else "",
+                    ),
+                ),
+                row("Model", label),
+                row("Quiet hours", blocks.code(dnd or "off")),
+                row(
+                    "Timezone",
+                    blocks.seq(
+                        blocks.code(settings.timezone_effective),
+                        " ",
+                        blocks.datetime_(now.strftime("%H:%M"), int(now.timestamp())),
+                    ),
+                ),
+                row("Replies today", blocks.bold(str(today))),
+                row("Replies total", str(total)),
+                row(
+                    "Last hour",
+                    f"{stats['replies_last_hour']} of {stats['limits']['global_hourly']}",
+                ),
+            ],
+            bordered=True,
+            striped=True,
+        ),
+        blocks.footer(blocks.seq("Change the tone with ", blocks.bot_command("/persona"), ".")),
+    ]
+
+
+def limits_blocks(owner: int) -> list[dict]:
+    """The safety panel, using a task list and a collapsible details block."""
+    snapshot = limiter_for(owner).snapshot()
+    limits = snapshot["limits"]
+    recent = snapshot["recently_blocked"]
+    body = [
+        blocks.heading("Safety limits", size=1),
+        blocks.list_(
+            [
+                blocks.list_item(
+                    blocks.seq(
+                        "Replies last hour: ",
+                        blocks.bold(str(snapshot["replies_last_hour"])),
+                        f" of {limits['global_hourly']}",
+                    )
+                ),
+                blocks.list_item(
+                    blocks.seq(
+                        "Replies today: ",
+                        blocks.bold(str(snapshot["replies_last_day"])),
+                        f" of {limits['global_daily']}",
+                    )
+                ),
+                blocks.list_item(f"Chats active this hour: {snapshot['active_chats_this_hour']}"),
+                blocks.list_item(
+                    f"Burst penalty right now: +{snapshot['current_burst_penalty_s']}s"
+                ),
+            ]
+        ),
+        blocks.divider(),
+        blocks.heading("Protection", size=2),
+        blocks.list_(
+            [
+                blocks.list_item(
+                    "Contacts are exempt from every volume limit",
+                    checkbox=True,
+                    checked=bool(limits["contacts_exempt_from_limits"]),
+                ),
+                blocks.list_item(
+                    "Stranger screening", checkbox=True, checked=settings.stranger_screening
+                ),
+                blocks.list_item(
+                    f"Stranger reply cap: {limits['stranger_max_replies']}",
+                    checkbox=True,
+                    checked=True,
+                ),
+                blocks.list_item("Never replies to a bot", checkbox=True, checked=True),
+            ]
+        ),
+    ]
+    if recent:
+        body.append(
+            blocks.details(
+                "Recently blocked",
+                [blocks.list_([blocks.list_item(str(reason)) for reason in recent])],
+            )
+        )
+    body.append(
+        blocks.blockquote(
+            "These keep the account from being flagged for automation.",
+            credit="safety",
+        )
+    )
+    return body
+
+
+def help_blocks(*, is_admin: bool = False) -> list[dict]:
+    """The command guide, as headings and lists of tappable commands."""
+
+    def commands(*names: str) -> dict:
+        return blocks.list_(
+            [
+                blocks.list_item(blocks.seq(blocks.bot_command(f"/{name}"), f" - {description}"))
+                for name, description in COMMANDS + ADMIN_COMMANDS
+                if name in names
+            ]
+        )
+
+    body = [
+        blocks.heading("Command guide", size=1),
+        blocks.paragraph("Tap any command to run it."),
+        blocks.heading("Account", size=2),
+        commands("login", "logout", "cancel"),
+        blocks.heading("Control", size=2),
+        commands("status", "limits", "diag", "pause", "resume"),
+        blocks.heading("Personality", size=2),
+        commands("persona", "prompt", "clearprompt", "model"),
+        blocks.heading("Reach", size=2),
+        commands("quiet", "quietoff", "block", "unblock", "blocked", "trust"),
+        blocks.heading("Groups and guarding", size=2),
+        commands("allowgroup", "disallowgroup", "groups", "guard"),
+        blocks.heading("Memory", size=2),
+        commands("forget", "forgetall", "clearcache"),
+        blocks.heading("Extras", size=2),
+        commands("voice", "rich", "schedule", "schedules", "deleteme"),
+        blocks.divider(),
+        blocks.expandable_quote(
+            "Forward a message to @userinfobot to find a user or group id. "
+            "Group replies also need a mention. Everything you set applies "
+            "to your account only."
+        ),
+    ]
+    if is_admin:
+        body.append(blocks.heading("Admin", size=2))
+        body.append(commands("users", "gstats", "broadcast", "ban", "unban"))
+    body.append(blocks.footer("Bot API 10.1 rich message. Toggle with /rich."))
+    return body
+
+
+async def _may_guard(bot, chat_id: int, owner: int) -> tuple[bool, str]:
+    """May this user set the guard policy for that group?
+
+    Only an admin of the group, and only when the bot is in it with the
+    right to add members. Anything we cannot verify is a refusal: guessing
+    here would let a stranger control somebody else's door.
+    """
+    try:
+        await bot.get_entity(chat_id)
+    except Exception:
+        return False, (
+            f"I cannot see `{chat_id}`. Add me to the group as an admin first, "
+            "then try again. Forward a group message to @userinfobot to get the id."
+        )
+    try:
+        rights = await bot.get_permissions(chat_id, owner)
+    except Exception:
+        return False, (
+            "I could not check whether you are an admin there. Make sure you are "
+            "an admin of that group and that I am in it too."
+        )
+    if not (getattr(rights, "is_admin", False) or getattr(rights, "is_creator", False)):
+        return False, "Only an admin of that group can change its guardian settings."
+    return True, ""
+
+
 async def clear_cache(owner: int) -> str:
     """Wipe one user's conversation state, keeping their login and settings.
 
@@ -328,19 +585,79 @@ async def clear_cache(owner: int) -> str:
 async def persona_panel(owner: int):
     """The persona chooser, shared by /persona and the menu button."""
     current = await mongo.get_persona_key(owner)
+    custom = await mongo.get_prompt(owner)
     buttons = [
         [Button.inline(f"{p.label}{' (on)' if p.key == current else ''}", data=f"persona:{p.key}")]
         for p in persona_choices()
     ]
     body = "\n".join(f"{p.label} - {p.description}" for p in persona_choices())
+    note = (
+        "\n\nYou have a custom /prompt. The persona sets the tone on top of "
+        "it, so switching here does change how replies sound."
+        if custom
+        else ""
+    )
     text = (
         "🎭 **Reply personality**\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         f"{body}\n\n"
         f"Current: **{current}**\n"
-        "_All personalities reply in English._"
+        "_All personalities reply in English._" + note
     )
     return text, buttons
+
+
+async def persona_blocks(owner: int) -> list[dict]:
+    current = await mongo.get_persona_key(owner)
+    custom = await mongo.get_prompt(owner)
+    body = [
+        blocks.heading("Reply personality", size=1),
+        blocks.list_(
+            [
+                blocks.list_item(
+                    blocks.seq(
+                        blocks.bold(p.label),
+                        " - ",
+                        p.description,
+                    ),
+                    checkbox=True,
+                    checked=p.key == current,
+                )
+                for p in persona_choices()
+            ]
+        ),
+    ]
+    if custom:
+        body.append(
+            blocks.blockquote(
+                blocks.seq(
+                    "You have a custom ",
+                    blocks.bot_command("/prompt"),
+                    ". It says who you are; the persona says how you sound. "
+                    "Both are sent to the model, so switching here really "
+                    "does change the replies.",
+                )
+            )
+        )
+    body.append(blocks.footer("All personalities reply in English."))
+    return body
+
+
+async def persona_markup(owner: int) -> dict:
+    """Keyboard where the active persona is a disabled button.
+
+    ``DisabledButton`` arrived on 24 August 2026. A greyed-out button is the
+    honest way to show the choice you already made: it stays in place, it
+    just does nothing when tapped.
+    """
+    current = await mongo.get_persona_key(owner)
+    rows = []
+    for choice in persona_choices():
+        if choice.key == current:
+            rows.append([botapi.disabled_button(f"{choice.label} (current)")])
+        else:
+            rows.append([botapi.button(choice.label, data=f"persona:{choice.key}")])
+    return botapi.inline_keyboard(rows)
 
 
 def help_text(*, is_admin: bool = False) -> str:
@@ -485,12 +802,14 @@ def register(bot: TelegramClient, start_user_client) -> None:
     @bot.on(events.NewMessage(pattern=r"^/status$"))
     @_registered
     async def cmd_status(event):
-        await _say(event, await status_text(event.sender_id))
+        await send_panel(
+            bot, event, await status_text(event.sender_id), await status_blocks(event.sender_id)
+        )
 
     @bot.on(events.NewMessage(pattern=r"^/limits$"))
     @_registered
     async def cmd_limits(event):
-        await _say(event, limits_text(event.sender_id))
+        await send_panel(bot, event, limits_text(event.sender_id), limits_blocks(event.sender_id))
 
     @bot.on(events.NewMessage(pattern=r"^/diag$"))
     @_registered
@@ -513,8 +832,16 @@ def register(bot: TelegramClient, start_user_client) -> None:
     @bot.on(events.NewMessage(pattern=r"^/persona$"))
     @_registered
     async def cmd_persona(event):
-        text, buttons = await persona_panel(event.sender_id)
-        await _say(event, text, buttons=buttons)
+        owner = event.sender_id
+        text, buttons = await persona_panel(owner)
+        await send_panel(
+            bot,
+            event,
+            text,
+            await persona_blocks(owner),
+            buttons,
+            api_markup=await persona_markup(owner),
+        )
 
     @bot.on(events.CallbackQuery(pattern=rb"^persona:(.+)$"))
     async def cb_persona(event):
@@ -523,9 +850,15 @@ def register(bot: TelegramClient, start_user_client) -> None:
         key = event.data.decode().split(":", 1)[1]
         await mongo.set_persona_key(event.sender_id, key)
         await event.answer("Personality updated")
+        custom = await mongo.get_prompt(event.sender_id)
         await event.edit(
             f"✅ **Personality set to `{key}`.**\n\n"
-            "_A custom /prompt, if set, still overrides this._",
+            + (
+                "Your custom /prompt still defines who you are; this sets "
+                "how warm, formal or playful the replies sound."
+                if custom
+                else "_Try it: the next reply will use the new tone._"
+            ),
             parse_mode="markdown",
         )
 
@@ -988,38 +1321,141 @@ def register(bot: TelegramClient, start_user_client) -> None:
 
     # ── help ──────────────────────────────────────────────────────────────
     # ── rich messages ─────────────────────────────────────────────────────
-    @bot.on(events.NewMessage(pattern=r"^/rich(?:\s+(-?\d+))?$"))
+    @bot.on(events.NewMessage(pattern=r"^/rich(?:\s+(on|off))?$"))
     @_registered
     async def cmd_rich(event):
-        """Show the rich-message sample, here or in a real chat."""
-        target = event.pattern_match.group(1)
-        if not target:
-            await send_rich(bot, event.chat_id, demo_message())
+        """Turn Bot API 10.1 rich messages on or off for your panels."""
+        owner = event.sender_id
+        choice = (event.pattern_match.group(1) or "").lower()
+        if choice:
+            await mongo.set_user_setting(owner, "rich", choice == "on")
+
+        wanted = bool(await mongo.get_user_setting(owner, "rich", True))
+        server_ok = botapi.rich_supported()
+        deployment_ok = settings.rich_messages
+
+        state = "on" if wanted else "off"
+        detail = ""
+        if wanted and not deployment_ok:
+            detail = "\n\nRICH_MESSAGES is false on this deployment, so panels are plain."
+        elif wanted and not server_ok:
+            detail = (
+                "\n\nThis Telegram server has not answered a sendRichMessage call, "
+                "so panels fall back to ordinary formatting automatically."
+            )
+
+        text = (
+            "**Rich messages**\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"Currently: **{state}**\n\n"
+            "Bot API 10.1 formatting for this bot's own panels: headings, "
+            "tables, task lists, collapsible sections and dividers instead "
+            "of plain markdown. Your auto-replies are never sent this way, "
+            "because a formatted document arriving in a DM does not look "
+            "like a person typing.\n\n"
+            "Use /rich on or /rich off." + detail
+        )
+        rich = [
+            blocks.heading("Rich messages", size=1),
+            blocks.paragraph(blocks.seq("Currently ", blocks.bold(state), " for your panels.")),
+            blocks.list_(
+                [
+                    blocks.list_item("Headings, dividers and footers"),
+                    blocks.list_item("Tables with borders and stripes"),
+                    blocks.list_item("Task lists and custom numbering"),
+                    blocks.list_item("Collapsible details and quotations"),
+                ]
+            ),
+            blocks.blockquote(
+                "Auto-replies stay plain text on purpose. A structured "
+                "document arriving in a DM does not read like a person."
+            ),
+            blocks.footer(blocks.seq("Turn it off with ", blocks.bot_command("/rich"), " off.")),
+        ]
+        await send_panel(bot, event, text, rich)
+
+    # ── join request guardian ─────────────────────────────────────────
+    @bot.on(events.NewMessage(pattern=r"^/guard(?:\s+(-?\d+))?(?:\s+(\w+))?$"))
+    @_registered
+    async def cmd_guard(event):
+        """Screen who is allowed into one of your groups."""
+        owner = event.sender_id
+        chat_id = event.pattern_match.group(1)
+        mode = (event.pattern_match.group(2) or "").lower()
+
+        if not chat_id:
+            rows = await mongo.list_guards(owner)
+            if not rows:
+                await _say(
+                    event,
+                    "🛡 **Join request guardian**\n"
+                    "━━━━━━━━━━━━━━━━━━━━\n"
+                    "No groups are guarded yet.\n\n"
+                    "Add me to a group as an admin who can add members, turn on "
+                    "**Approve new members** in the group settings, then send "
+                    "`/guard <group_id> captcha`.\n\n"
+                    "**Modes**\n"
+                    "`off` - leave requests for a human\n"
+                    "`auto` - screen and approve real accounts\n"
+                    "`captcha` - screen, then ask the person to tap a button\n\n"
+                    "Bots, deleted accounts and accounts Telegram has flagged as "
+                    "scam or fake are always declined.",
+                )
+                return
+            listed = "\n".join(f"`{row['chat_id']}` - **{row.get('mode', 'off')}**" for row in rows)
             await _say(
                 event,
-                "☝️ That is the control bot sending it.\n\n"
-                "To see it arrive from **your own account** - the way your "
-                "contacts will see it - send `/rich <user id>`. "
-                "Try your own id first: `/rich " + str(event.sender_id) + "`",
+                "🛡 **Guarded groups**\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"{listed}\n\n"
+                "Change one with `/guard <group_id> off|auto|captcha`.",
             )
             return
 
-        chat_id = int(target)
-        user_client = _user_clients.get(event.sender_id)
-        if user_client is None:
-            await _say(event, "🔴 Your account is not connected. Send /login first.")
-            return
-        try:
-            await send_rich(user_client, chat_id, demo_message())
-        except Exception as exc:
+        chat_id = int(chat_id)
+        if mode not in guardian.MODES:
             await _say(
                 event,
-                f"❌ Could not send to `{chat_id}`: `{type(exc).__name__}`\n\n"
-                "The account needs to be able to message that id - try your "
-                "own id, or someone you have talked to before.",
+                "Pick a mode: `/guard "
+                f"{chat_id}"
+                " off`, `/guard "
+                f"{chat_id}"
+                " auto` or `/guard "
+                f"{chat_id}"
+                " captcha`.",
             )
             return
-        await _say(event, f"✅ Sent the rich sample to `{chat_id}` from your account.")
+
+        allowed, why = await _may_guard(bot, chat_id, owner)
+        if not allowed:
+            await _say(event, why)
+            return
+
+        if mode == "off":
+            await mongo.delete_guard(chat_id)
+            await _say(
+                event,
+                f"🛡 Guardian is **off** for `{chat_id}`. Join requests will wait "
+                "for a human again.",
+            )
+            return
+
+        await mongo.set_guard(chat_id, mode, owner)
+        detail = (
+            "Every requester is screened, then asked to tap the right button in a "
+            "private message. A wrong tap declines them; no answer leaves the "
+            "request waiting for you."
+            if mode == "captcha"
+            else "Every requester is screened and approved unless they are a bot, a "
+            "deleted account, or flagged by Telegram."
+        )
+        await _say(
+            event,
+            f"🛡 Guardian is **{mode}** for `{chat_id}`.\n\n{detail}\n\n"
+            "Turn it off with `/guard "
+            f"{chat_id}"
+            " off`.",
+        )
 
     # ── voice replies ─────────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/voice(?:\s+([\s\S]+))?$"))
@@ -1226,21 +1662,28 @@ def register(bot: TelegramClient, start_user_client) -> None:
         await event.answer()
 
         if action == "status":
-            await _say(event, await status_text(owner))
+            await send_panel(bot, event, await status_text(owner), await status_blocks(owner))
         elif action == "limits":
-            await _say(event, limits_text(owner))
+            await send_panel(bot, event, limits_text(owner), limits_blocks(owner))
         elif action == "help":
-            await _say(
+            admin = settings.is_owner(owner)
+            await send_panel(
+                bot,
                 event,
-                help_text(is_admin=settings.is_owner(owner)),
-                buttons=main_menu(
-                    signed_in=bool(await mongo.load_session(owner)),
-                    is_admin=settings.is_owner(owner),
-                ),
+                help_text(is_admin=admin),
+                help_blocks(is_admin=admin),
+                main_menu(signed_in=bool(await mongo.load_session(owner)), is_admin=admin),
             )
         elif action == "persona":
             text, buttons = await persona_panel(owner)
-            await _say(event, text, buttons=buttons)
+            await send_panel(
+                bot,
+                event,
+                text,
+                await persona_blocks(owner),
+                buttons,
+                api_markup=await persona_markup(owner),
+            )
         elif action == "prompt":
             await mongo.set_user_setting(owner, "prompt_draft", [])
             await _say(
@@ -1306,13 +1749,13 @@ def register(bot: TelegramClient, start_user_client) -> None:
     @bot.on(events.NewMessage(pattern=r"^/help$"))
     @_registered
     async def cmd_help(event):
-        await _say(
+        admin = settings.is_owner(event.sender_id)
+        await send_panel(
+            bot,
             event,
-            help_text(is_admin=settings.is_owner(event.sender_id)),
-            buttons=main_menu(
-                signed_in=bool(await mongo.load_session(event.sender_id)),
-                is_admin=settings.is_owner(event.sender_id),
-            ),
+            help_text(is_admin=admin),
+            help_blocks(is_admin=admin),
+            main_menu(signed_in=bool(await mongo.load_session(event.sender_id)), is_admin=admin),
         )
 
 

@@ -18,6 +18,7 @@ from config import settings
 log = logging.getLogger(__name__)
 
 __all__ = [
+    "deserves_big_reaction",
     "detect_sentiment",
     "is_quiet_hours",
     "send_reaction",
@@ -73,6 +74,65 @@ _NEGATIVE = frozenset(
 POSITIVE_REACTIONS = ("❤️", "🔥", "👍", "😍", "🤩", "💯", "🎉", "✨")
 NEGATIVE_REACTIONS = ("😢", "💔", "😮", "🫂")
 NEUTRAL_REACTIONS = ("👍", "👀", "🤔", "😂")
+
+#: Words that mean the message is an event, not small talk. Telegram plays
+#: the full-screen animation for a "big" reaction, and that is worth doing
+#: for news worth celebrating, not for "ok".
+_BIG_MOMENTS = frozenset(
+    [
+        "congrats",
+        "congratulations",
+        "engaged",
+        "married",
+        "wedding",
+        "birthday",
+        "promoted",
+        "promotion",
+        "selected",
+        "passed",
+        "cleared",
+        "won",
+        "winner",
+        "hired",
+        "job",
+        "offer",
+        "graduated",
+        "topper",
+        "first",
+        "accepted",
+        "approved",
+        "finally",
+        "launched",
+        "shipped",
+        "baby",
+        "anniversary",
+        "love",
+        "miss",
+        "proud",
+    ]
+)
+
+
+def deserves_big_reaction(text: str) -> bool:
+    """Is this a moment, rather than a message?
+
+    Telegram's big reaction is an animation that takes over the screen. Used
+    on everything it is noise, and noise from an account that replies to
+    everything is exactly the pattern that gets reported. Used on the two
+    or three messages a week that actually deserve it, it reads as a person
+    paying attention.
+    """
+    body = (text or "").strip()
+    if not body or len(body) > 300:
+        return False
+    words = {w.strip(".,!?;:'\"").lower() for w in body.split()}
+    if words & _BIG_MOMENTS:
+        return True
+    if body.count("!") >= 3:
+        return True
+    # SHOUTING is either excitement or a crisis, and both are big.
+    letters = [c for c in body if c.isalpha()]
+    return len(letters) >= 6 and all(c.isupper() for c in letters)
 
 
 def detect_sentiment(text: str) -> str:
@@ -177,8 +237,12 @@ async def simulate_typing(
     await asyncio.sleep(random.uniform(0.1, 0.3))
 
 
-async def send_reaction(client, event, sentiment: str = "neutral") -> None:
-    """React to a message, if the chat allows reactions at all."""
+async def send_reaction(client, event, sentiment: str = "neutral", *, big: bool = False) -> None:
+    """React to a message, if the chat allows reactions at all.
+
+    ``big`` plays Telegram's full-screen animation. See
+    :func:`deserves_big_reaction` for when that is appropriate.
+    """
     if not settings.reactions_enabled:
         return
     pool = {
@@ -190,12 +254,17 @@ async def send_reaction(client, event, sentiment: str = "neutral") -> None:
         from telethon.tl.functions.messages import SendReactionRequest
         from telethon.tl.types import ReactionEmoji
 
+        # The parameter is "reaction", singular, even though it takes a
+        # list. It was "reactions" here for a long time, and because the
+        # whole call is wrapped in a swallow, every reaction this bot has
+        # ever tried to send failed silently as a TypeError.
         await client(
             SendReactionRequest(
                 peer=event.chat_id,
                 msg_id=event.id,
-                big=False,
-                reactions=[ReactionEmoji(emoticon=random.choice(pool))],
+                big=bool(big),
+                add_to_recent=True,
+                reaction=[ReactionEmoji(emoticon=random.choice(pool))],
             )
         )
     except Exception as exc:
@@ -235,3 +304,20 @@ def is_quiet_hours(value: str | None, *, now: dt.datetime | None = None) -> bool
     if start <= end:
         return start <= current <= end
     return current >= start or current <= end
+
+
+async def mark_as_read(client, event) -> bool:
+    """Send the read receipt: the sender's single tick becomes a double one.
+
+    Done *after* replying, never before. Marking a message read the instant
+    it arrives and then taking twenty seconds to answer is a worse tell than
+    not marking it at all: no human reads at machine speed and then pauses.
+    """
+    if not settings.mark_as_read:
+        return False
+    try:
+        await client.send_read_acknowledge(event.chat_id, max_id=event.id)
+    except Exception as exc:  # a read receipt is never worth an error
+        log.debug("could not mark as read: %s", type(exc).__name__)
+        return False
+    return True
