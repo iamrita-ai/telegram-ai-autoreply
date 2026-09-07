@@ -1,209 +1,286 @@
-# 🤖 Telegram Userbot — Auto Reply with AI
+# 🤖 Telegram AI Auto-Reply
 
-A smart Telegram userbot that replies to your DMs and allowed groups using AI, with a deep romantic personality (Serena), conversation memory, and full owner control via a separate bot.
+**An AI that answers your Telegram messages in your voice, while you're asleep, in a meeting, or just away from your phone.**
+
+You stay signed in as yourself. A separate control bot is your remote: pause it, switch its personality, set quiet hours, and see exactly what it has been doing.
+
+<p align="center">
+  <img alt="Python" src="https://img.shields.io/badge/python-3.11%20|%203.12-blue">
+  <img alt="Telethon" src="https://img.shields.io/badge/telethon-1.38+-2CA5E0">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-green">
+</p>
 
 ---
 
-## ✨ Features
+## What it does
 
-| Feature | Details |
+| | |
 |---|---|
-| 🧠 AI Replies | Groq / SambaNova / NVIDIA — auto fallback chain |
-| 💬 Conversation Memory | 14-day rolling history per user |
-| 👥 Group Control | Only replies in groups you explicitly allow |
-| 🧩 Incomplete Message Detection | Waits for full thought before replying |
-| 🎭 Serena Persona | Romantic, poetic, emotionally deep AI personality |
-| 🔄 Auto Cleanup | Old history auto-deleted (DM: 14d, Group: 24h) |
-| 😴 DND Mode | Silent hours — no replies in set time window |
-| 📅 Scheduled Messages | Morning / Afternoon / Night auto-greetings |
-| 🔥 Big Reactions | Animated emoji reactions on every message |
-| ⌨️ Typing Animation | Human-like chunked typing simulation |
-| 🔒 Session Encrypted | MongoDB with Fernet encryption |
-| 🌐 Offline Mode | Always appears offline even while running |
+| 🎭 **Three personalities** | Professional, Casual or Romantic — switch instantly with `/persona`, or write your own with `/prompt` |
+| 🇬🇧 **English throughout** | Every reply, command and message is in English |
+| 🛡 **Account-safety rails** | Rate limits, cooldowns and human pacing, because Telegram bans accounts that behave like bots |
+| 🧠 **Remembers the conversation** | 14 days per DM, 24 hours per group, kept apart so a group thread never leaks into a private one |
+| ⌨️ **Types like a person** | Reads, pauses, types in bursts — no instant robotic answers |
+| 👥 **Groups are opt-in** | Only allowed groups, and only when you're actually mentioned |
+| 😴 **Quiet hours** | Silent between the hours you choose, in *your* timezone |
+| 📅 **Scheduled messages** | Daily morning / afternoon / night greetings, freshly written each time |
+| 🔁 **Four AI providers** | Groq, SambaNova and NVIDIA NIM, with automatic failover |
+| 🔐 **Encrypted sessions** | Session strings are Fernet-encrypted at rest |
 
 ---
 
-## 🚀 Setup
-
-### 1. Environment Variables (Render / Railway / VPS)
+## How it works
 
 ```
-API_ID=your_telegram_api_id
-API_HASH=your_telegram_api_hash
-BOT_TOKEN=your_control_bot_token
-MONGO_URI=mongodb+srv://...
-ENCRYPTION_KEY=your_fernet_key_here
-SAMBANOVA_API_KEY=optional
-GROQ_API_KEY=optional
-NVIDIA_API_KEY=optional
+                    ┌──────────────────┐
+   you  ──/commands─▶│   Control bot    │   @YourControlBot
+                    │  (bot token)     │   pause, persona, limits, login
+                    └────────┬─────────┘
+                             │ starts / configures
+                    ┌────────▼─────────┐
+ friends ──DM──────▶│  Your account    │──▶ AI provider (Groq / SambaNova / NVIDIA)
+                    │  (user session)  │◀── reply, typed out at human speed
+                    └────────┬─────────┘
+                             │
+                    ┌────────▼─────────┐
+                    │     MongoDB      │  history · settings · encrypted session
+                    └──────────────────┘
 ```
 
-> At least one AI API key is required. Get free keys:
-> - Groq: https://console.groq.com
-> - SambaNova: https://cloud.sambanova.ai
-> - NVIDIA: https://build.nvidia.com
-
-### 2. Generate Encryption Key
-
-```python
-from cryptography.fernet import Fernet
-print(Fernet.generate_key().decode())
-```
-
-### 3. Deploy on Render
-
-- New Web Service → connect your GitHub repo
-- Build command: `pip install -r requirements.txt`
-- Start command: `python main.py`
-- Add all ENV vars in the Render dashboard
+Two Telegram identities, one process. The **control bot** never reads your DMs; the **user session** never takes commands from anyone.
 
 ---
 
-## 🎮 Bot Commands (Control Bot)
+## Setup
 
-### 🔑 Login / Logout
-```
-/login       — Account login karo (phone → OTP → 2FA)
-/logout      — Session delete karo
-```
+### 1. Collect five things
 
-### 🔒 Lock / Unlock
-```
-/lock        — Auto-reply band karo
-/unlock      — Auto-reply chalu karo
-```
+| Value | Where from |
+|---|---|
+| `API_ID`, `API_HASH` | [my.telegram.org](https://my.telegram.org) → API development tools |
+| `BOT_TOKEN` | [@BotFather](https://t.me/BotFather) → `/newbot` — this is the *control* bot |
+| `OWNER_IDS` | Forward any message to [@userinfobot](https://t.me/userinfobot) |
+| `MONGO_URI` | A free [MongoDB Atlas](https://www.mongodb.com/atlas) cluster |
+| An AI key | [Groq](https://console.groq.com) (free tier), [SambaNova](https://cloud.sambanova.ai), or [NVIDIA NIM](https://build.nvidia.com) |
 
-### 📊 Status
-```
-/status      — Sab settings ek jagah
-/stats       — Total aur aaj ke replies
+Generate the encryption key:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-### 🤖 AI Model
-```
-/model       — Model switch karo (inline buttons)
+### 2. Deploy
+
+<details open>
+<summary><b>Render (recommended)</b></summary>
+
+1. Fork this repo.
+2. **New → Web Service**, point it at your fork. `render.yaml` sets the rest up.
+3. Add the environment variables from [`.env.example`](.env.example) in the dashboard.
+4. Deploy, then open `https://your-app.onrender.com/healthz` — it should return JSON.
+
+</details>
+
+<details>
+<summary><b>Docker</b></summary>
+
+```bash
+cp .env.example .env      # fill it in
+docker build -t tg-autoreply .
+docker run --env-file .env -p 8080:8080 tg-autoreply
 ```
 
-### 📝 Prompt / Persona
-```
-/prompt <text>     — AI ka personality badlo
-/clearprompt       — Default Serena persona wapas
-/getprompt         — Current prompt dekho
-```
-**Example:**
-```
-/prompt Tum Serena ho, romantic aur poetic tarike se baat karo
+</details>
+
+<details>
+<summary><b>Locally</b></summary>
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env      # fill it in
+python main.py
 ```
 
-### 🚫 Blacklist / Whitelist
-```
-/blacklist <user_id>       — User ko block karo
-/unblacklist <user_id>     — Unblock karo
-/whitelist <user_id>       — VIP user
-/unwhitelist <user_id>     — VIP hatao
-```
-**User ID kaise pata kare:** @userinfobot pe koi bhi message forward karo
+</details>
 
-### 🗑️ History
-```
-/clearhistory <user_id>    — Ek user ki history wipe
-/clearallhistory           — Sabki history ek saath clear
-```
-> Auto-cleanup: DM history 14 din baad, Group history 24 ghante baad automatically delete hoti hai
+### 3. Sign in
 
-### 👥 Group Control
-```
-/allowgroup <group_id>     — Is group mein reply allow karo
-/disallowgroup <group_id>  — Group remove karo
-/listgroups                — Saare allowed groups dekho
-```
-**Group ID kaise pata kare:**
-1. Group mein @userinfobot add karo
-2. `/id` bhejo — group ID milegi (usually negative number like `-1001234567890`)
+Message your control bot:
 
-> ⚠️ Groups mein bot sirf tab reply karta hai jab:
-> 1. Group allowed ho (`/allowgroup` se)
-> 2. Bot ko @mention kiya gaya ho
-
-### ⏱️ Delay
 ```
-/delay 2.5       — Reply se pehle 2.5 second ruko
+/login
 ```
 
-### 😴 DND (Do Not Disturb)
-```
-/dnd 23:00-07:00     — Raat 11 se subah 7 tak silent
-/dndoff              — DND hatao
+It asks for the phone number of the account that should auto-reply, then the code Telegram sends you, then your 2FA password if you have one. **Your code and password messages are deleted automatically.**
+
+That's it — the account starts replying.
+
+---
+
+## Commands
+
+All commands go to your **control bot**, and only your `OWNER_IDS` can use them.
+
+### Account
+| Command | Description |
+|---|---|
+| `/login` | Sign the auto-reply account in |
+| `/logout` | Sign out and delete the stored session |
+| `/cancel` | Abort a login in progress |
+
+### Control
+| Command | Description |
+|---|---|
+| `/pause` · `/resume` | Stop and start replying |
+| `/status` | Persona, model, quiet hours, replies today, hourly usage |
+| `/limits` | How close you are to the safety caps |
+| `/diag` | Test every AI provider right now, with timings |
+
+### Personality
+| Command | Description |
+|---|---|
+| `/persona` | Pick Professional, Casual or Romantic |
+| `/prompt <text>` | Write your own personality; overrides the persona |
+| `/clearprompt` | Go back to the chosen persona |
+| `/model` | Pick an AI provider, or leave it automatic |
+
+### Reach
+| Command | Description |
+|---|---|
+| `/quiet 23:00-07:00` · `/quietoff` | Silent hours, in your timezone |
+| `/block <id>` · `/unblock <id>` · `/blocked` | Never reply to someone |
+| `/allowgroup <id>` · `/disallowgroup <id>` · `/groups` | Group allow-list |
+
+### Memory & scheduling
+| Command | Description |
+|---|---|
+| `/forget <id>` · `/forgetall` | Clear conversation history |
+| `/schedule <id> morning\|afternoon\|night HH:MM` | Daily greeting |
+| `/unschedule <id> <kind>` · `/schedules` | Manage them |
+
+---
+
+## Staying un-banned
+
+Telegram restricts accounts that behave mechanically. This is the part most auto-reply projects ignore, so it is worth being explicit about what the bot does on your behalf:
+
+- **Never answers instantly.** It reads, pauses, and types at human speed, in bursts for longer replies.
+- **Caps its own volume** — per chat, per hour and per day (`/limits` shows the current usage).
+- **Waits longer before the first reply to a new chat**, which is where instant answers look most artificial.
+- **Only one reply in flight per chat**, so a burst of messages never produces a burst of answers.
+- **Ignores groups** unless you allow them *and* you're mentioned.
+- **Respects quiet hours** — nobody types at 4am every night for a month.
+- **Backs off on Telegram's own `FloodWait`** instead of retrying into a limit.
+
+The defaults are conservative on purpose. Every one is tunable in [`.env.example`](.env.example).
+
+> **Note:** automating a user account is against Telegram's Terms of Service. This project is for replying to your own conversations; the safety rails reduce risk but cannot eliminate it. Do not use it to send unsolicited messages.
+
+---
+
+## Configuration
+
+Every setting is an environment variable, documented in [`.env.example`](.env.example). The ones worth knowing:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `DEFAULT_PERSONA` | `casual` | Personality on first start |
+| `TIMEZONE` | `Asia/Kolkata` | Quiet hours, schedules, daily counter |
+| `PER_CHAT_HOURLY_LIMIT` | `30` | Replies to one chat per hour |
+| `GLOBAL_DAILY_LIMIT` | `500` | Replies across all chats per day |
+| `HISTORY_LIMIT` | `20` | Turns of context sent to the model |
+| `REACTIONS_ENABLED` | `true` | React to incoming DMs with an emoji |
+| `LOG_LEVEL` | `INFO` | `DEBUG` for troubleshooting |
+
+---
+
+## Health and monitoring
+
+```bash
+curl https://your-app.onrender.com/healthz
 ```
 
-### 📅 Scheduled Messages
+```json
+{
+  "status": "ok",
+  "uptime_s": 3184.2,
+  "accounts_running": 1,
+  "config": { "persona": "casual", "providers": ["groq", "sambanova"], "timezone": "Asia/Kolkata" },
+  "safety": { "replies_last_hour": 7, "replies_last_day": 42 }
+}
 ```
-/schedule <user_id> morning 08:00      — Roz subah 8 baje good morning
-/schedule <user_id> afternoon 14:00    — Dopahar 2 baje
-/schedule <user_id> night 22:00        — Raat 10 baje good night
-/unschedule <user_id> morning          — Schedule hatao
+
+It returns **503** when no account is signed in, so an uptime monitor catches a half-dead deploy instead of a green tick on a bot that stopped replying hours ago.
+
+---
+
+## Project layout
+
+```
+main.py                 startup, health endpoint, graceful shutdown
+config.py               typed settings, validated at boot
+core/
+├── personas.py         the three personalities + shared house rules
+├── safety.py           rate limits and anti-ban decisions
+├── humanize.py         typing rhythm, reactions, quiet hours
+└── logging_setup.py    structured logging
+handlers/
+├── userbot.py          incoming message pipeline
+├── control.py          the owner's command surface
+├── ai.py               providers, failover, fragment buffering
+└── scheduler.py        daily greetings
+database/mongo.py       storage, encryption, retention
+tests/                  51 tests, no network required
 ```
 
 ---
 
-## 🎭 Serena — AI Personality
+## Development
 
-Default persona for `@TechnicalSerena` account:
+```bash
+pip install -r requirements.txt pytest pytest-asyncio ruff
+python -m pytest -q      # 51 tests, all offline
+ruff check . && ruff format --check .
+```
 
-- **Romantic & Poetic** — Novel-inspired language, deep emotional connection
-- **Intelligent** — Thinks like the Professor from Money Heist
-- **Adaptive** — Matches user's language (Hinglish / English) and tone
-- **Short replies** — 1–3 lines, real chat feel, never long paragraphs
-- **Never breaks character** — Always human, never admits being AI
+CI runs the same three checks — lint, tests on 3.11 and 3.12, and a Docker build — on every push.
 
 ---
 
-## 🧠 Smart Features
+## Troubleshooting
 
-### Incomplete Message Detection
-If a user sends fragments like:
-```
-User: "tum"
-User: "kha se hoo?"
-```
-Bot waits for the full thought before replying. Single words or dangling sentences are buffered (up to 10 minutes) and combined with the next message.
+<details>
+<summary><b>"The login expired" during sign-in</b></summary>
 
-### 14-Day Rolling History
-- Every user's conversation is remembered for 14 days
-- Day 15 onwards, Day 1 messages start auto-deleting (rolling window)
-- Users with no activity for 14 days → full history wiped
-- Group history: only 24 hours retained
+Telegram invalidates a login code if it is used on a different connection than the one that requested it, and codes expire in about two minutes. Send `/login` again and paste the code promptly. If the service restarted mid-login, start over.
+</details>
 
-### Daily Rotating Busy Messages
-When AI fails, bot sends a natural "unavailable" message. The pool rotates daily so the same excuse never repeats two days in a row.
+<details>
+<summary><b>The bot never replies</b></summary>
 
----
+Check `/status` first:
+- `Replies: 🔴 paused` → send `/resume`
+- Quiet hours covering the current time → `/quietoff`
+- In a group: the group must be in `/groups` **and** you must be mentioned
+- `/limits` at a cap → wait, or raise the cap
+- `/diag` showing every provider failing → your API key is wrong or out of quota
+</details>
 
-## 📁 Project Structure
+<details>
+<summary><b>Replies sound wrong</b></summary>
 
-```
-├── main.py                  — Entry point, event handlers
-├── config.py                — All settings and constants
-├── handlers/
-│   ├── ai_handler.py        — AI API calls, Serena prompt, message buffering
-│   ├── bot_handler.py       — Control bot commands
-│   ├── logger.py            — Disabled (no log channel)
-│   └── scheduler.py         — Scheduled morning/night messages
-├── database/
-│   └── mongo.py             — All DB operations
-├── utils/
-│   └── helpers.py           — Typing animation, reactions, DND
-└── requirements.txt
-```
+`/persona` switches the tone. For something specific, `/prompt` takes a free-text personality and overrides the persona entirely; `/clearprompt` reverts.
+</details>
+
+<details>
+<summary><b>Health check returns 503</b></summary>
+
+No user account is signed in — the control bot is up but nothing is replying. Send `/login`.
+</details>
 
 ---
 
-## 📦 Requirements
+## License
 
-```
-telethon
-motor
-cryptography
-httpx
-phonenumbers
-```
+MIT — see [LICENSE](LICENSE).

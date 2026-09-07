@@ -1,156 +1,193 @@
+"""Typed, validated configuration.
+
+Everything the bot needs comes from environment variables, so the same image
+runs locally and on Render with no code change. Values are read once at
+import and validated by :func:`Settings.validate`, which fails fast with a
+readable list of problems instead of crashing later on a missing key.
+"""
+
+from __future__ import annotations
+
 import os
-import random
-import datetime
+from dataclasses import dataclass, field
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-# ============================================================
-#   OWNER CONFIGURATION
-# ============================================================
-OWNER_IDS = [1598576202, 6518065496]
+__all__ = ["ConfigError", "Settings", "settings"]
 
-# ============================================================
-#   TELEGRAM CREDENTIALS
-# ============================================================
-API_ID       = int(os.environ.get("API_ID", "0"))
-API_HASH     = os.environ.get("API_HASH", "")
-PHONE_NUMBER = os.environ.get("PHONE_NUMBER", "")
-BOT_TOKEN    = os.environ.get("BOT_TOKEN", "")
 
-# ============================================================
-#   SESSION ENCRYPTION
-# ============================================================
-ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY", "")
+class ConfigError(RuntimeError):
+    """Raised when the bot cannot possibly start with this configuration."""
 
-# ============================================================
-#   MONGODB
-# ============================================================
-MONGO_URI = os.environ.get("MONGO_URI", "")
 
-# ============================================================
-#   AI API KEYS
-# ============================================================
-SAMBANOVA_API_KEY = os.environ.get("SAMBANOVA_API_KEY", "")
-GROQ_API_KEY      = os.environ.get("GROQ_API_KEY", "")
-NVIDIA_API_KEY    = os.environ.get("NVIDIA_API_KEY", "")
+def _env(key: str, default: str = "") -> str:
+    return (os.environ.get(key) or default).strip()
 
-# ── Model strings ─────────────────────────────────────────────
-GROQ_MODEL_70B        = "llama-3.3-70b-versatile"
-GROQ_MODEL_8B         = "llama-3.1-8b-instant"
-SAMBANOVA_MODEL       = "Meta-Llama-3.3-70B-Instruct"
-NVIDIA_MODEL_70B      = "meta/llama-3.3-70b-instruct"
-NVIDIA_MODEL_MAVERICK = "meta/llama-4-maverick-17b-128e-instruct"
-GROQ_MODEL            = GROQ_MODEL_70B
 
-def get_available_models() -> list:
-    models = []
-    if GROQ_API_KEY:
-        models.append({"id": "groq_70b",        "label": "⚡ Groq — Llama 3.3 70B",           "provider": "groq",      "model": GROQ_MODEL_70B})
-        models.append({"id": "groq_8b",         "label": "⚡ Groq — Llama 3.1 8B 🚀",         "provider": "groq",      "model": GROQ_MODEL_8B})
-    if SAMBANOVA_API_KEY:
-        models.append({"id": "sambanova",       "label": "🚀 SambaNova — Llama 3.3 70B",       "provider": "sambanova", "model": SAMBANOVA_MODEL})
-    if NVIDIA_API_KEY:
-        models.append({"id": "nvidia_70b",      "label": "🟢 NVIDIA NIM — Llama 3.3 70B",      "provider": "nvidia",    "model": NVIDIA_MODEL_70B})
-        models.append({"id": "nvidia_maverick", "label": "🟢 NVIDIA NIM — Llama 4 Maverick 🔥", "provider": "nvidia",    "model": NVIDIA_MODEL_MAVERICK})
-    return models
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(_env(key) or default)
+    except ValueError:
+        return default
 
-# ============================================================
-#   LOG CHANNEL — disabled
-# ============================================================
-LOG_CHANNEL_ID = 0
 
-# ============================================================
-#   DELAY SETTINGS
-# ============================================================
-MIN_DELAY       = 1.2
-MAX_DELAY       = 3.5
-TYPING_SPEED    = 0.04
-MAX_TYPING_TIME = 6.0
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(_env(key) or default)
+    except ValueError:
+        return default
 
-# ============================================================
-#   REACTIONS
-# ============================================================
-POSITIVE_REACTIONS = ["❤️", "🔥", "👍", "😍", "🤩", "💯", "🎉", "✨", "🫡"]
-NEGATIVE_REACTIONS = ["😢", "💔", "😮", "🫤"]
-NEUTRAL_REACTIONS  = ["👍", "🤝", "👀", "😂", "🤔", "💀"]
 
-# ============================================================
-#   BUSY / FALLBACK MESSAGES
-#   — Rotates daily so same excuse never repeats
-#   — 30 unique sets: leaving / busy / sleeping (10 each)
-# ============================================================
+def _env_bool(key: str, default: bool) -> bool:
+    raw = _env(key).lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
 
-_LEAVING_MSGS = [
-    "Chal nikalna hai, baad mein baat karte hain 🙏",
-    "Kuch urgent aa gaya, thodi der mein wapas aata hun",
-    "Abhi door hun, ping karo kal",
-    "Nikal raha hun, catch you later ✌️",
-    "Bhai kaam hai yaar, baad mein",
-    "Jaana padega, hold on karo",
-    "Running out, talk soon",
-    "Gotta go, ping me later",
-    "Thoda busy ho gaya hun, baad mein",
-    "Abhi nahi yaar, thodi der mein 🙏",
-]
-_BUSY_MSGS = [
-    "Abhi kaam mein hun, ek second",
-    "Thoda tied up hun, baad mein reply karunga",
-    "Busy hun yaar, wait karo",
-    "Kuch kaam hai, thodi der mein",
-    "Distracted hun abhi, baad mein",
-    "Occupied right now, bear with me",
-    "Stuck in something, brb",
-    "On it with something else, hold on",
-    "Thoda handle karna hai kuch, 2 min",
-    "Mid something, hit me later",
-]
-_SLEEPING_MSGS = [
-    "Neend aa rahi hai yaar 😴 kal milte hain",
-    "Sone ja raha hun, good night",
-    "Off ho raha hun, kal baat karte hain",
-    "Tired hun, rest kar raha hun",
-    "Calling it a night, talk tmrw 🌙",
-    "Ja raha hun so, baad mein",
-    "Eyes closing, gn yaar",
-    "Dozing off, catch you tmrw",
-    "Kal baat karte hain, raat ho gayi",
-    "Sleep mode on 😴",
-]
 
-def _day_seed() -> int:
-    """Same seed for the whole day → same message set each day, changes next day."""
-    d = datetime.date.today()
-    return d.year * 10000 + d.month * 100 + d.day
+def _env_ids(key: str) -> tuple[int, ...]:
+    raw = _env(key).replace(";", ",")
+    out: list[int] = []
+    for chunk in raw.split(","):
+        chunk = chunk.strip()
+        if chunk.lstrip("-").isdigit():
+            out.append(int(chunk))
+    return tuple(out)
 
-def get_busy_message() -> str:
-    """Returns a random busy message. Pool changes every day."""
-    rng   = random.Random(_day_seed())
-    pool  = _LEAVING_MSGS + _BUSY_MSGS + _SLEEPING_MSGS
-    # Pick 5 for today, then random from those 5
-    today_pool = rng.sample(pool, 5)
-    return random.choice(today_pool)
 
-# Keep BUSY_MESSAGES list for backward compat (ai_handler uses random.choice)
-BUSY_MESSAGES = _LEAVING_MSGS + _BUSY_MSGS + _SLEEPING_MSGS
+@dataclass(slots=True)
+class Settings:
+    # -- Telegram ---------------------------------------------------------
+    api_id: int = field(default_factory=lambda: _env_int("API_ID", 0))
+    api_hash: str = field(default_factory=lambda: _env("API_HASH"))
+    bot_token: str = field(default_factory=lambda: _env("BOT_TOKEN"))
+    #: Who may drive the control bot. Everyone else is ignored outright.
+    owner_ids: tuple[int, ...] = field(default_factory=lambda: _env_ids("OWNER_IDS"))
 
-# ============================================================
-#   SCHEDULED MESSAGE TEMPLATES
-# ============================================================
-MORNING_MSGS = [
-    "Good morning! ☀️ Aaj ka din ekdam mast ho tumhara!",
-    "Subah bakhair! 🌅 Uth jao, duniya tumhara intezaar kar rahi hai!",
-    "Rise and shine! ✨ Aaj bhi ek naya din, nayi opportunities!",
-    "Good morning! ☕ Chai/coffee pi lo aur day start karo!",
-    "Wakey wakey! 🌞 Aaj kuch naya aur kuch mast hoga zaroor!",
-]
-AFTERNOON_MSGS = [
-    "Good afternoon! ☀️ Umeed hai din accha ja raha hai!",
-    "Dopahar mubarak! 🌤️ Thoda break lo, kuch khao!",
-    "Hey! Afternoon check-in — sab theek? 😊",
-    "Good afternoon! Halfway through the day — keep it up! 💪",
-]
-NIGHT_MSGS = [
-    "Good night! 🌙 Neend achhi aaye, sweet dreams!",
-    "Raat bakhair! 😴 So jao ab, kal phir milenge!",
-    "Shab bakhair! 🌟 Aaj jo bhi kiya, mast tha — rest karo!",
-    "Good night! 🌙 Phone rakh do ab aur so jao 😄",
-    "Sleep tight! ✨ Kal fir baat karte hain!",
-]
+    # -- Storage ----------------------------------------------------------
+    mongo_uri: str = field(default_factory=lambda: _env("MONGO_URI") or _env("MONGODB_URI"))
+    mongo_db: str = field(default_factory=lambda: _env("MONGO_DB", "userbot"))
+    #: Fernet key protecting the stored Telegram session strings.
+    encryption_key: str = field(default_factory=lambda: _env("ENCRYPTION_KEY"))
+
+    # -- AI providers -----------------------------------------------------
+    groq_api_key: str = field(default_factory=lambda: _env("GROQ_API_KEY"))
+    sambanova_api_key: str = field(default_factory=lambda: _env("SAMBANOVA_API_KEY"))
+    nvidia_api_key: str = field(default_factory=lambda: _env("NVIDIA_API_KEY"))
+    ai_timeout: float = field(default_factory=lambda: _env_float("AI_TIMEOUT", 25.0))
+    ai_max_tokens: int = field(default_factory=lambda: _env_int("AI_MAX_TOKENS", 300))
+    ai_temperature: float = field(default_factory=lambda: _env_float("AI_TEMPERATURE", 0.85))
+
+    # -- Behaviour --------------------------------------------------------
+    default_persona: str = field(default_factory=lambda: _env("DEFAULT_PERSONA", "casual").lower())
+    #: Local timezone for schedules, quiet hours and the daily counter.
+    timezone: str = field(default_factory=lambda: _env("TIMEZONE", "Asia/Kolkata"))
+    history_limit: int = field(default_factory=lambda: _env_int("HISTORY_LIMIT", 20))
+    dm_retention_days: int = field(default_factory=lambda: _env_int("DM_RETENTION_DAYS", 14))
+    group_retention_hours: int = field(
+        default_factory=lambda: _env_int("GROUP_RETENTION_HOURS", 24)
+    )
+
+    # -- Human-like timing ------------------------------------------------
+    typing_speed: float = field(default_factory=lambda: _env_float("TYPING_SPEED", 0.04))
+    max_typing_time: float = field(default_factory=lambda: _env_float("MAX_TYPING_TIME", 6.0))
+    reactions_enabled: bool = field(default_factory=lambda: _env_bool("REACTIONS_ENABLED", True))
+
+    # -- Safety rails -----------------------------------------------------
+    #
+    # This runs on a *real* Telegram account, and Telegram bans accounts that
+    # behave like bots: instant replies, identical cadence, unlimited volume.
+    # These defaults are deliberately conservative.
+    #
+    #: Minimum seconds between two replies in the same chat.
+    per_chat_cooldown: float = field(default_factory=lambda: _env_float("PER_CHAT_COOLDOWN", 4.0))
+    #: Maximum replies to one chat per hour.
+    per_chat_hourly_limit: int = field(
+        default_factory=lambda: _env_int("PER_CHAT_HOURLY_LIMIT", 30)
+    )
+    #: Maximum replies across all chats per hour.
+    global_hourly_limit: int = field(default_factory=lambda: _env_int("GLOBAL_HOURLY_LIMIT", 120))
+    #: Maximum replies across all chats per day.
+    global_daily_limit: int = field(default_factory=lambda: _env_int("GLOBAL_DAILY_LIMIT", 500))
+    #: Extra pause before the first-ever reply to an unknown chat, so a new
+    #: conversation never starts with a suspiciously instant answer.
+    new_chat_extra_delay: float = field(
+        default_factory=lambda: _env_float("NEW_CHAT_EXTRA_DELAY", 3.0)
+    )
+    #: Ignore messages that arrive while a reply is already being composed.
+    drop_while_replying: bool = field(
+        default_factory=lambda: _env_bool("DROP_WHILE_REPLYING", True)
+    )
+
+    # -- Runtime ----------------------------------------------------------
+    port: int = field(default_factory=lambda: _env_int("PORT", 8080))
+    log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO").upper())
+
+    # -- Derived ----------------------------------------------------------
+    @property
+    def tz(self) -> ZoneInfo:
+        try:
+            return ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            return ZoneInfo("UTC")
+
+    @property
+    def ai_configured(self) -> bool:
+        return bool(self.groq_api_key or self.sambanova_api_key or self.nvidia_api_key)
+
+    def is_owner(self, user_id: int) -> bool:
+        return user_id in self.owner_ids
+
+    def validate(self) -> None:
+        """Raise :class:`ConfigError` listing everything that is missing."""
+        problems: list[str] = []
+        if not self.api_id:
+            problems.append("API_ID is not set (get it from my.telegram.org)")
+        if not self.api_hash:
+            problems.append("API_HASH is not set (get it from my.telegram.org)")
+        if not self.bot_token:
+            problems.append("BOT_TOKEN is not set (create one with @BotFather)")
+        if not self.owner_ids:
+            problems.append("OWNER_IDS is not set - nobody would be able to control the bot")
+        if not self.mongo_uri:
+            problems.append("MONGO_URI is not set (a free MongoDB Atlas tier is fine)")
+        if not self.encryption_key:
+            problems.append(
+                "ENCRYPTION_KEY is not set - session strings would be stored in "
+                "plain text. Generate one with: "
+                'python -c "from cryptography.fernet import Fernet; '
+                'print(Fernet.generate_key().decode())"'
+            )
+        if not self.ai_configured:
+            problems.append(
+                "No AI provider key set - add GROQ_API_KEY, SAMBANOVA_API_KEY or NVIDIA_API_KEY"
+            )
+        if problems:
+            raise ConfigError(
+                "Configuration is incomplete:\n" + "\n".join(f"  - {p}" for p in problems)
+            )
+
+    def describe(self) -> dict[str, object]:
+        """Non-secret summary, safe to log at startup."""
+        return {
+            "owners": len(self.owner_ids),
+            "persona": self.default_persona,
+            "timezone": self.timezone,
+            "providers": [
+                name
+                for name, key in (
+                    ("groq", self.groq_api_key),
+                    ("sambanova", self.sambanova_api_key),
+                    ("nvidia", self.nvidia_api_key),
+                )
+                if key
+            ],
+            "reactions": self.reactions_enabled,
+            "limits": {
+                "per_chat_hourly": self.per_chat_hourly_limit,
+                "global_hourly": self.global_hourly_limit,
+                "global_daily": self.global_daily_limit,
+            },
+        }
+
+
+settings = Settings()

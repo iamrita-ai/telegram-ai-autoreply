@@ -1,21 +1,23 @@
 services:
   - type: web
-    name: tg-userbot
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python main.py
+    name: telegram-ai-autoreply
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    autoDeploy: true
     envVars:
-      - key: PYTHONPATH
-        value: /opt/render/project/src
+      # Secrets are set in the Render dashboard, never committed.
       - key: API_ID
         sync: false
       - key: API_HASH
         sync: false
-      - key: PHONE_NUMBER
-        sync: false
       - key: BOT_TOKEN
         sync: false
+      - key: OWNER_IDS
+        sync: false
       - key: MONGO_URI
+        sync: false
+      - key: ENCRYPTION_KEY
         sync: false
       - key: GROQ_API_KEY
         sync: false
@@ -23,7 +25,10 @@ services:
         sync: false
       - key: NVIDIA_API_KEY
         sync: false
-      - key: LOG_CHANNEL_ID
-        sync: false
-      - key: ENCRYPTION_KEY
-        sync: false
+      # Non-secret defaults, safe to keep in the repo.
+      - key: DEFAULT_PERSONA
+        value: casual
+      - key: TIMEZONE
+        value: Asia/Kolkata
+      - key: LOG_LEVEL
+        value: INFO

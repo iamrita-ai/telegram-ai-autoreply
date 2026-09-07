@@ -1,112 +1,128 @@
+"""Scheduled daily messages.
+
+Two bugs from the previous version are fixed here:
+
+* **Timezone.** Times were matched against the server clock, which is UTC on
+  Render, so a schedule set for 08:00 fired at 13:30 in India. Matching now
+  happens in the configured local timezone.
+* **Duplicate sends.** The loop compared ``HH:MM`` every 60 seconds, so a
+  slow iteration could match the same minute twice and send twice. Each
+  schedule is now marked as sent for that day.
 """
-scheduler.py — AI-generated greetings, unique every time.
-Supports Groq, SambaNova, NVIDIA NIM.
-"""
-import asyncio, datetime, httpx, random
-from config import (
-    SAMBANOVA_API_KEY, GROQ_API_KEY, NVIDIA_API_KEY,
-    SAMBANOVA_MODEL, GROQ_MODEL_70B, NVIDIA_MODEL_70B,
-)
-from database.mongo import get_active_schedules, increment_stat, get_setting
 
-SAMBANOVA_URL = "https://api.sambanova.ai/v1/chat/completions"
-GROQ_URL      = "https://api.groq.com/openai/v1/chat/completions"
-NVIDIA_URL    = "https://integrate.api.nvidia.com/v1/chat/completions"
+from __future__ import annotations
 
-_sent_history: dict = {}
-_HISTORY_SIZE = 10
+import asyncio
+import datetime as dt
+import logging
+import random
 
-PERSONA_MAP = {
-    "TechnicalSerena": "Serena", "technicalserena": "Serena",
-    "Xioqui_Xin": "Xioqui",     "xioqui_xin":      "Xioqui",
+from config import settings
+from core.personas import get_persona
+from database import mongo
+from handlers import ai
+
+log = logging.getLogger(__name__)
+
+__all__ = ["run_scheduler"]
+
+_FALLBACKS = {
+    "morning": (
+        "Morning! Hope today treats you well.",
+        "Good morning ☀️",
+        "Morning — have a good one.",
+    ),
+    "afternoon": (
+        "Afternoon! How's the day going?",
+        "Hey, hope the day's going well.",
+        "Afternoon check-in — all good?",
+    ),
+    "night": (
+        "Night! Sleep well.",
+        "Goodnight 🌙",
+        "Heading off — talk tomorrow.",
+    ),
 }
 
-def _persona_name(username) -> str:
-    return PERSONA_MAP.get(username or "", "me")
+#: (user_id, kind) -> date already handled, so a schedule fires once a day.
+_sent_today: dict[tuple[int, str], str] = {}
+#: Recent texts per user, so the greeting is not identical every morning.
+_recent: dict[int, list[str]] = {}
 
-async def _try_api(url, api_key, model, system, user_msg):
-    if not api_key: return None
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {
-        "model": model,
-        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user_msg}],
-        "max_tokens": 80, "temperature": 1.1,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.post(url, headers=headers, json=payload)
-            if resp.status_code == 200:
-                return resp.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        print(f"[Scheduler] Error: {e}")
-    return None
 
-async def _generate_greeting(stype: str, username, uid: int) -> str:
-    persona = _persona_name(username)
-    past    = _sent_history.get(uid, [])
-    avoid   = "\n".join(f"- {m}" for m in past[-6:]) if past else "None"
-    time_map = {"morning": "good morning", "afternoon": "good afternoon", "night": "good night / goodbye for the night"}
-    greeting_type = time_map.get(stype, stype)
-
+async def _compose(kind: str, user_id: int) -> str:
+    """Ask the model for a fresh greeting, falling back to a canned one."""
+    persona = get_persona(await mongo.get_persona_key())
+    avoid = _recent.get(user_id, [])[-5:]
     system = (
-        f"You are {persona}, a real person texting a friend on Telegram. "
-        f"Write a short, warm, natural {greeting_type} message. "
-        f"Sound human — casual, friendly, maybe a tiny bit playful. "
-        f"1-2 sentences max. 1 emoji max. "
-        f"Never repeat these previous messages:\n{avoid}\n"
-        f"Do NOT include quotes or explanation — just the message itself."
+        f"{persona.prompt}\n"
+        f"Write a short {kind} greeting to send first, unprompted. "
+        "One or two sentences, English, at most one emoji. "
+        "Return only the message itself, with no quotes."
     )
-    user_msg = f"Send a {greeting_type} message."
+    if avoid:
+        system += "\nDo not reuse any of these:\n" + "\n".join(f"- {a}" for a in avoid)
 
-    preferred = await get_setting("preferred_model", "sambanova")
-    model_map = {
-        "sambanova":       (SAMBANOVA_URL, SAMBANOVA_API_KEY, SAMBANOVA_MODEL),
-        "groq_70b":        (GROQ_URL,      GROQ_API_KEY,      GROQ_MODEL_70B),
-        "groq_8b":         (GROQ_URL,      GROQ_API_KEY,      "llama-3.1-8b-instant"),
-        "nvidia_70b":      (NVIDIA_URL,    NVIDIA_API_KEY,    NVIDIA_MODEL_70B),
-        "nvidia_maverick": (NVIDIA_URL,    NVIDIA_API_KEY,    "meta/llama-4-maverick-17b-128e-instruct"),
-    }
-    order = [preferred] + [m for m in ["sambanova", "groq_70b", "nvidia_70b"] if m != preferred]
-    for mid in order:
-        info = model_map.get(mid)
-        if not info: continue
-        result = await _try_api(*info, system, user_msg)
-        if result: return result
+    reply, _ = await ai._complete(
+        [
+            {"role": "system", "content": system},
+            {"role": "user", "content": f"Send the {kind} greeting."},
+        ]
+    )
+    if reply:
+        return reply
 
-    fallbacks = {
-        "morning":   ["Good morning! ☀️", "Morning! Hope your day's great 🌅", "Rise and shine! ✨"],
-        "afternoon": ["Good afternoon! 😊", "Hey, hope your day's going well! ☀️"],
-        "night":     ["Good night! 🌙", "Sleep well! 😴", "Night! Rest up ✨"],
-    }
-    options  = fallbacks.get(stype, ["Hey! 👋"])
-    past_set = set(past)
-    fresh    = [m for m in options if m not in past_set]
-    return random.choice(fresh if fresh else options)
+    options = [m for m in _FALLBACKS.get(kind, ("Hey!",)) if m not in avoid]
+    return random.choice(options or list(_FALLBACKS.get(kind, ("Hey!",))))
 
-def _record_sent(uid: int, msg: str):
-    _sent_history.setdefault(uid, []).append(msg)
-    if len(_sent_history[uid]) > _HISTORY_SIZE:
-        _sent_history[uid] = _sent_history[uid][-_HISTORY_SIZE:]
 
-async def run_scheduler(client, me_username=None):
-    print("[Scheduler] Started.")
+def _remember(user_id: int, text: str) -> None:
+    history = _recent.setdefault(user_id, [])
+    history.append(text)
+    del history[:-10]
+
+
+async def run_scheduler(client, *, interval: float = 30.0) -> None:
+    """Check every 30 s whether a scheduled message is due."""
+    log.info("scheduler started (timezone %s)", settings.timezone)
     while True:
         try:
-            now          = datetime.datetime.now()
-            current_time = now.strftime("%H:%M")
-            schedules    = await get_active_schedules()
-            for s in schedules:
-                if s.get("time") != current_time: continue
-                uid   = s["user_id"]
-                stype = s["type"]
-                msg   = await _generate_greeting(stype, me_username, uid)
-                _record_sent(uid, msg)
-                try:
-                    await client.send_message(uid, msg)
-                    await increment_stat("total_replies")
-                    print(f"[Scheduler] Sent {stype} to {uid}: {msg}")
-                except Exception as e:
-                    print(f"[Scheduler] Send error → {uid}: {e}")
-        except Exception as e:
-            print(f"[Scheduler] Loop error: {e}")
-        await asyncio.sleep(60)
+            await _tick(client)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("scheduler tick failed")
+        await asyncio.sleep(interval)
+
+
+async def _tick(client, *, now: dt.datetime | None = None) -> int:
+    now = now or dt.datetime.now(settings.tz)
+    current = now.strftime("%H:%M")
+    today = now.strftime("%Y-%m-%d")
+    sent = 0
+
+    if await mongo.is_locked():
+        return 0
+
+    for row in await mongo.get_active_schedules():
+        user_id, kind = row.get("user_id"), row.get("type")
+        if row.get("time") != current:
+            continue
+        if _sent_today.get((user_id, kind)) == today:
+            continue
+
+        _sent_today[(user_id, kind)] = today
+        try:
+            text = await _compose(kind, user_id)
+            await client.send_message(user_id, text)
+            _remember(user_id, text)
+            await mongo.increment_stat("total_replies")
+            await mongo.increment_today()
+            sent += 1
+            log.info("sent %s greeting to %s", kind, user_id)
+        except Exception as exc:
+            # Leave it marked as sent: retrying every 30 s against a user who
+            # has blocked the account is exactly the behaviour that gets an
+            # account limited.
+            log.warning("could not send %s greeting to %s: %s", kind, user_id, exc)
+    return sent

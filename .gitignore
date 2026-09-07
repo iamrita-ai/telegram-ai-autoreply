@@ -67,3 +67,6 @@ coverage.xml
 *.orig
 dump.rdb
 
+
+# ── Project ──────────────────────────────────────────────────
+.ruff_cache/
