@@ -207,9 +207,9 @@ async def answer_join_request_query(
     acting on the chat. Telethon has no MTProto equivalent for the query id,
     so this is only reachable when the update arrives over HTTP.
     """
-    chosen = [name for name, on in (("approve", approve), ("decline", decline), ("queue", queue)) if on]
+    chosen = [
+        name for name, on in (("approve", approve), ("decline", decline), ("queue", queue)) if on
+    ]
     if len(chosen) != 1:
         raise ValueError("choose exactly one of approve, decline or queue")
-    return await call(
-        "answerChatJoinRequestQuery", {"query_id": query_id, "result": chosen[0]}
-    )
+    return await call("answerChatJoinRequestQuery", {"query_id": query_id, "result": chosen[0]})
