@@ -104,8 +104,27 @@ class Settings:
     )
 
     # -- Human-like timing ------------------------------------------------
-    typing_speed: float = field(default_factory=lambda: _env_float("TYPING_SPEED", 0.04))
-    max_typing_time: float = field(default_factory=lambda: _env_float("MAX_TYPING_TIME", 6.0))
+    #
+    # Timing scales with the *length of the reply*: a two-word answer should
+    # land in a couple of seconds, a paragraph should take as long as a
+    # paragraph takes to type. A fixed delay is both annoying for short
+    # replies and an obvious tell for long ones.
+    #
+    #: Seconds per character while "typing" (0.045 ~ 22 chars/s, a fast thumb).
+    typing_speed: float = field(default_factory=lambda: _env_float("TYPING_SPEED", 0.045))
+    #: Floor for the typing indicator, so even "ok" is not instant.
+    min_typing_time: float = field(default_factory=lambda: _env_float("MIN_TYPING_TIME", 0.8))
+    #: Ceiling, so a very long reply does not sit in "typing…" forever.
+    max_typing_time: float = field(default_factory=lambda: _env_float("MAX_TYPING_TIME", 18.0))
+    #: Seconds per character spent *reading* the incoming message.
+    reading_speed: float = field(default_factory=lambda: _env_float("READING_SPEED", 0.018))
+    #: Ceiling for the reading pause.
+    max_reading_time: float = field(default_factory=lambda: _env_float("MAX_READING_TIME", 4.0))
+    #: Thinking pause before typing starts, per character of the reply. A
+    #: longer answer implies more thought, so it gets a longer pause.
+    thinking_speed: float = field(default_factory=lambda: _env_float("THINKING_SPEED", 0.012))
+    #: Ceiling for the thinking pause.
+    max_thinking_time: float = field(default_factory=lambda: _env_float("MAX_THINKING_TIME", 5.0))
     reactions_enabled: bool = field(default_factory=lambda: _env_bool("REACTIONS_ENABLED", True))
 
     # -- Safety rails -----------------------------------------------------
@@ -133,6 +152,20 @@ class Settings:
     drop_while_replying: bool = field(
         default_factory=lambda: _env_bool("DROP_WHILE_REPLYING", True)
     )
+    #: People in the signed-in account's own contact list are not rate
+    #: limited: no per-chat cooldown, no hourly or daily cap. Volume limits
+    #: exist to stop the account spraying messages at people who never asked
+    #: for them, and a saved contact is the opposite of that. Pacing, the
+    #: duplicate guard and the echo-loop guard still apply to everyone.
+    contact_unlimited: bool = field(default_factory=lambda: _env_bool("CONTACT_UNLIMITED", True))
+    #: Minimum account-wide gap between messages when talking to a contact.
+    #: Still non-zero - Telegram's own flood limits do not care who you are
+    #: talking to - but far smaller than the stranger-facing gap.
+    contact_min_gap: float = field(default_factory=lambda: _env_float("CONTACT_MIN_GAP", 2.0))
+    #: Never auto-reply to another bot, whatever else is configured. Two
+    #: bots answering each other is an infinite loop that Telegram reads as
+    #: spam from both sides. There is no env override on purpose.
+    reply_to_bots: bool = False
 
     # -- Anti-ban: pacing -------------------------------------------------
     #: Minimum seconds between *any* two outgoing messages, account-wide.
@@ -189,6 +222,26 @@ class Settings:
     # -- Runtime ----------------------------------------------------------
     port: int = field(default_factory=lambda: _env_int("PORT", 8080))
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO").upper())
+
+    # -- Keep-alive -------------------------------------------------------
+    #
+    # Render (and every other free host) suspends a web service that has had
+    # no *inbound HTTP request* for ~15 minutes. Telegram traffic arrives on
+    # an outbound socket, so it does not count: the account can be in the
+    # middle of a conversation and still be put to sleep, which is exactly
+    # what the "shutting down / bye" line in the logs was. The fix is for the
+    # service to request its own public URL on a timer.
+    keepalive: bool = field(default_factory=lambda: _env_bool("KEEPALIVE", True))
+    #: Public URL to ping. Render injects RENDER_EXTERNAL_URL automatically,
+    #: so on Render this needs no configuration at all.
+    keepalive_url: str = field(
+        default_factory=lambda: _env("KEEPALIVE_URL") or _env("RENDER_EXTERNAL_URL")
+    )
+    #: Seconds between pings. Must stay comfortably under the host's idle
+    #: window (15 minutes on Render).
+    keepalive_interval: float = field(
+        default_factory=lambda: max(60.0, _env_float("KEEPALIVE_INTERVAL", 600.0))
+    )
 
     # -- Derived ----------------------------------------------------------
     @property
@@ -291,10 +344,12 @@ class Settings:
                 if key
             ],
             "reactions": self.reactions_enabled,
+            "keepalive": bool(self.keepalive and self.keepalive_url),
             "limits": {
                 "per_chat_hourly": self.per_chat_hourly_limit,
                 "global_hourly": self.global_hourly_limit,
                 "global_daily": self.global_daily_limit,
+                "contacts_exempt": self.contact_unlimited,
             },
         }
 

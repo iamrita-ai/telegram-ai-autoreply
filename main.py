@@ -11,6 +11,7 @@ import signal
 import time
 from typing import Any
 
+import aiohttp
 from aiohttp import web
 from telethon import TelegramClient
 from telethon.errors import (
@@ -67,6 +68,7 @@ def _health_payload() -> dict[str, Any]:
             "resolved": settings.timezone_ok,
             "local_time": dt.datetime.now(settings.tz).isoformat(timespec="seconds"),
         },
+        "keepalive": dict(_keepalive_state),
         "warnings": warnings,
         "config": settings.describe(),
         "safety": safety.aggregate_snapshot(),
@@ -99,6 +101,78 @@ async def _start_health_server() -> web.AppRunner:
     await web.TCPSite(runner, "0.0.0.0", settings.port).start()
     log.info("health endpoint listening on :%s", settings.port)
     return runner
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  Keep-alive
+# ──────────────────────────────────────────────────────────────────────────
+#: Last keepalive result, surfaced on /healthz so a silent failure is visible.
+_keepalive_state: dict[str, Any] = {"enabled": False, "url": "", "last": None, "ok": None}
+
+
+def keepalive_target(url: str) -> str:
+    """Normalise a base URL into the exact endpoint to ping."""
+    url = (url or "").strip().rstrip("/")
+    if not url:
+        return ""
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    if url.endswith(("/healthz", "/health")):
+        return url
+    return url + "/healthz"
+
+
+async def _keepalive_loop(url: str, interval: float) -> None:
+    """Request our own public URL on a timer so the host does not idle us out.
+
+    Render suspends a web service after ~15 minutes with no inbound HTTP
+    request. Telegram traffic runs over an outbound socket and does not
+    count, so an account could be mid-conversation and still be shut down -
+    which is exactly what "shutting down / bye" in the logs was, three
+    minutes after the last reply. One cheap self-request per interval keeps
+    the instance resident.
+
+    The request goes to the *public* URL on purpose: hitting 127.0.0.1 would
+    never reach the platform's router and would not reset the idle timer.
+    """
+    session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
+    log.info("keep-alive: pinging %s every %.0fs", url, interval)
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                async with session.get(url) as response:
+                    # 503 is the health endpoint saying "no account signed
+                    # in" - the ping still did its job, which is to be an
+                    # inbound request.
+                    _keepalive_state.update(ok=True, last=time.time(), status=response.status)
+                    log.debug("keep-alive ping -> %s", response.status)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _keepalive_state.update(ok=False, last=time.time(), error=type(exc).__name__)
+                log.warning("keep-alive ping failed: %s", exc)
+    except asyncio.CancelledError:
+        raise
+    finally:
+        with contextlib.suppress(Exception):
+            await session.close()
+
+
+def start_keepalive() -> None:
+    """Start the keep-alive task, if a public URL is known."""
+    if not settings.keepalive:
+        log.info("keep-alive disabled by configuration")
+        return
+    url = keepalive_target(settings.keepalive_url)
+    if not url:
+        log.warning(
+            "keep-alive is on but no public URL is known - set KEEPALIVE_URL to this "
+            "service's address, or the host will suspend it after a quiet period"
+        )
+        return
+    _keepalive_state.update(enabled=True, url=url)
+    _spawn(_keepalive_loop(url, settings.keepalive_interval), name="keepalive")
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -291,6 +365,7 @@ async def main() -> None:
 
     await start_user_client()
     _spawn(userbot.cleanup_loop(), name="history-cleanup")
+    start_keepalive()
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

@@ -19,6 +19,7 @@ greeting is retried a few times and then skipped for the day.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import logging
 
@@ -127,6 +128,16 @@ async def _tick(client, owner: int, *, now: dt.datetime | None = None) -> int:
 
         _sent_today[(owner, target_id, kind)] = today
         try:
+            # Never greet a bot. A scheduled message is unprompted, so this
+            # is the one place the account speaks first - sending it to
+            # another bot is a loop nobody is reading.
+            entity = None
+            with contextlib.suppress(Exception):
+                entity = await client.get_entity(target_id)
+            if entity is not None and getattr(entity, "bot", False):
+                log.info("skipping %s greeting: %s is a bot", kind, target_id)
+                continue
+
             text = await _compose(owner, kind, target_id)
             if not text:
                 continue

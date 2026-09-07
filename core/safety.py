@@ -24,6 +24,13 @@ burst damping                speeding up exactly when you should slow down
 quiet-hours damping          human-speed replies at 3am
 ===========================  ====================================================
 
+Volume caps apply to people the account does *not* know. Saved contacts are
+exempt from them (``CONTACT_UNLIMITED``, on by default): a cap exists so the
+account cannot spray messages at people who never asked for them, and someone
+in your own address book is the opposite of that. Pacing, the duplicate guard,
+the echo-loop guard and the in-flight guard still apply to everybody - those
+are what actually keep the account alive.
+
 The limiter is intentionally in-memory. Losing the counters on restart is
 harmless (the process only restarts occasionally, and the counters are a
 safety ceiling rather than an accounting record), and it keeps the hot path
@@ -176,31 +183,42 @@ class RateLimiter:
         *,
         now: float | None = None,
         is_stranger: bool = False,
+        is_contact: bool = False,
         incoming_text: str | None = None,
         quiet_hours: bool = False,
     ) -> Decision:
-        """May the bot reply in ``chat_id`` right now?"""
+        """May the bot reply in ``chat_id`` right now?
+
+        ``is_contact`` marks somebody in the signed-in account's own contact
+        list. Those conversations are not capped or cooled down - see
+        ``CONTACT_UNLIMITED`` - because a volume ceiling protects strangers
+        from the account, not the account from its own friends.
+        """
         now = time.monotonic() if now is None else now
         self._expire(now)
+
+        unlimited = bool(is_contact and settings.contact_unlimited and not is_stranger)
 
         if chat_id in self._in_flight and settings.drop_while_replying:
             # A reply is already being composed for this chat. Answering the
             # follow-up too would produce two messages a second apart, which
-            # is the most obvious bot tell there is.
+            # is the most obvious bot tell there is. This applies to contacts
+            # too: it prevents double-sends, it is not a volume limit.
             return self._deny("already replying in this chat")
 
-        last = self._last_reply.get(chat_id)
-        if last is not None and now - last < self.per_chat_cooldown:
-            return self._deny("per-chat cooldown")
+        if not unlimited:
+            last = self._last_reply.get(chat_id)
+            if last is not None and now - last < self.per_chat_cooldown:
+                return self._deny("per-chat cooldown")
 
-        if len(self._chat_hits[chat_id]) >= self.per_chat_hourly_limit:
-            return self._deny("per-chat hourly limit reached")
+            if len(self._chat_hits[chat_id]) >= self.per_chat_hourly_limit:
+                return self._deny("per-chat hourly limit reached")
 
-        if len(self._global_hits) >= self.global_hourly_limit:
-            return self._deny("global hourly limit reached")
+            if len(self._global_hits) >= self.global_hourly_limit:
+                return self._deny("global hourly limit reached")
 
-        if len(self._day_hits) >= self.global_daily_limit:
-            return self._deny("global daily limit reached")
+            if len(self._day_hits) >= self.global_daily_limit:
+                return self._deny("global daily limit reached")
 
         # Ping-pong guard: the same text arriving over and over is another
         # bot, a stuck client, or somebody testing. Answering every time is
@@ -236,27 +254,39 @@ class RateLimiter:
                 )
 
         # Account-wide pacing: Telegram's heuristics look at the account, so
-        # ten chats answered in ten seconds is still a burst.
+        # ten chats answered in ten seconds is still a burst. Contacts get a
+        # much smaller gap - a real conversation with a friend does not have
+        # eight seconds of dead air before every message - but not zero,
+        # because Telegram's flood limits do not care who you are talking to.
+        min_gap = (
+            min(self.global_min_gap, settings.contact_min_gap)
+            if unlimited
+            else (self.global_min_gap)
+        )
         gap = now - self._last_send if self._last_send else None
         extra = 0.0
-        if gap is not None and gap < self.global_min_gap:
-            extra += self.global_min_gap - gap
+        if gap is not None and gap < min_gap:
+            extra += min_gap - gap
 
         # First contact with this chat: add a longer, more human pause.
         if chat_id not in self._known_chats:
-            extra += random.uniform(
+            first_touch = random.uniform(
                 self.new_chat_extra_delay * 0.6, self.new_chat_extra_delay * 1.4
             )
+            extra += first_touch * 0.34 if unlimited else first_touch
         if is_stranger:
             extra += random.uniform(
                 settings.stranger_extra_delay * 0.7, settings.stranger_extra_delay * 1.3
             )
 
         # Burst damping: the busier the last 10 minutes were, the slower the
-        # account gets. This is self-correcting and needs no tuning.
+        # account gets. This is self-correcting and needs no tuning. An
+        # active chat with a contact is damped far more gently, otherwise a
+        # normal back-and-forth would grind to a halt after ten messages.
         recent = sum(1 for hit in self._global_hits if hit > now - 600)
         if recent:
-            extra += min(recent * settings.burst_delay_step, settings.burst_delay_max)
+            penalty = min(recent * settings.burst_delay_step, settings.burst_delay_max)
+            extra += min(penalty * 0.15, 4.0) if unlimited else penalty
 
         if quiet_hours:
             extra *= settings.night_delay_factor
@@ -369,6 +399,7 @@ class RateLimiter:
                 "global_hourly": self.global_hourly_limit,
                 "global_daily": self.global_daily_limit,
                 "stranger_max_replies": settings.stranger_max_replies,
+                "contacts_exempt_from_limits": settings.contact_unlimited,
             },
         }
 

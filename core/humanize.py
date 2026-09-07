@@ -11,12 +11,19 @@ import asyncio
 import datetime as dt
 import logging
 import random
+from dataclasses import dataclass
 
 from config import settings
 
 log = logging.getLogger(__name__)
 
-__all__ = ["detect_sentiment", "is_quiet_hours", "send_reaction", "simulate_typing"]
+__all__ = [
+    "detect_sentiment",
+    "is_quiet_hours",
+    "send_reaction",
+    "simulate_typing",
+    "typing_plan",
+]
 
 _POSITIVE = frozenset(
     [
@@ -79,6 +86,56 @@ def detect_sentiment(text: str) -> str:
     return "neutral"
 
 
+@dataclass(frozen=True, slots=True)
+class TypingPlan:
+    """How long each stage of answering should take, in seconds."""
+
+    read: float
+    think: float
+    type: float
+
+    @property
+    def total(self) -> float:
+        return round(self.read + self.think + self.type, 2)
+
+
+def typing_plan(reply_text: str, source_text: str = "", *, jitter: bool = True) -> TypingPlan:
+    """Work out a human timing plan for one reply.
+
+    Every stage scales with length, which is the whole point: a two-word
+    answer should come back in about two seconds, and a four-line answer
+    should take as long as four lines take to write. A constant delay makes
+    short replies feel dead and long replies look pre-written.
+
+        "ok"                    ->  ~1.5 s total
+        a normal sentence       ->  ~4 s
+        a long paragraph        ->  ~15 s
+
+    Pure and deterministic with ``jitter=False`` so it can be tested.
+    """
+    reply = reply_text or ""
+    source = source_text or ""
+
+    def wobble(value: float, spread: float) -> float:
+        return value * random.uniform(1 - spread, 1 + spread) if jitter else value
+
+    # Reading: proportional to what was actually received.
+    read = min(len(source) * settings.reading_speed, settings.max_reading_time)
+    read = wobble(read, 0.25) + (random.uniform(0.2, 0.7) if jitter else 0.35)
+
+    # Thinking: a longer answer implies more to think about. Short answers
+    # get almost none, which is what keeps "yeah" from taking ten seconds.
+    think = min(len(reply) * settings.thinking_speed, settings.max_thinking_time)
+    think = wobble(think, 0.3) + (random.uniform(0.1, 0.4) if jitter else 0.2)
+
+    # Typing: the dominant term, straight from the reply length.
+    type_time = len(reply) * settings.typing_speed
+    type_time = wobble(type_time, 0.15)
+    type_time = max(settings.min_typing_time, min(type_time, settings.max_typing_time))
+
+    return TypingPlan(round(read, 2), round(think, 2), round(type_time, 2))
+
+
 async def simulate_typing(
     client,
     chat_id: int,
@@ -87,7 +144,7 @@ async def simulate_typing(
     source_text: str = "",
     extra_delay: float = 0.0,
 ) -> None:
-    """Read, think, then type - at roughly human speed.
+    """Read, think, then type - at roughly human speed, scaled to length.
 
     Long replies are typed in two bursts with a pause, because nobody types
     250 characters without stopping.
@@ -95,19 +152,19 @@ async def simulate_typing(
     if extra_delay > 0:
         await asyncio.sleep(extra_delay)
 
-    # Reading the incoming message.
-    words = len(source_text.split()) if source_text else 0
-    await asyncio.sleep(min(words * 0.09, 3.5) + random.uniform(0.4, 1.2))
+    plan = typing_plan(reply_text, source_text)
+    await asyncio.sleep(plan.read + plan.think)
 
-    typing_time = min(len(reply_text) * settings.typing_speed, settings.max_typing_time)
-    typing_time = max(0.8, typing_time + random.uniform(-0.3, 0.5))
-
+    typing_time = plan.type
     try:
-        if typing_time > 3.5:
+        if typing_time > 4.0:
+            # A long message is typed in two goes: type, pause (re-read what
+            # you wrote), finish. The indicator dropping and coming back is
+            # what a real person looks like from the other side.
             first = typing_time * random.uniform(0.45, 0.60)
             async with client.action(chat_id, "typing"):
                 await asyncio.sleep(first)
-            await asyncio.sleep(random.uniform(0.4, 0.9))
+            await asyncio.sleep(random.uniform(0.5, 1.4))
             async with client.action(chat_id, "typing"):
                 await asyncio.sleep(typing_time - first)
         else:

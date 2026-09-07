@@ -25,7 +25,7 @@ from handlers import ai
 
 log = logging.getLogger(__name__)
 
-__all__ = ["attach", "background_tasks"]
+__all__ = ["attach", "background_tasks", "ignore_reason", "is_contact"]
 
 #: Strong references to fire-and-forget tasks. Without this the garbage
 #: collector can cancel an in-flight reply mid-sentence.
@@ -39,6 +39,56 @@ _last_alert: dict[str, float] = {}
 _ALERT_COOLDOWN = 1800.0
 
 
+#: Telegram's own accounts. Answering these is pointless at best: 777000
+#: sends login codes, and the other two are proxies Telegram puts in front
+#: of channel posts and anonymous group admins.
+_SERVICE_IDS = frozenset({777000, 42777, 1087968824, 136817688})
+
+
+def is_contact(sender) -> bool:
+    """Is this sender in the signed-in account's own contact list?"""
+    return bool(getattr(sender, "contact", False) or getattr(sender, "mutual_contact", False))
+
+
+def ignore_reason(event, sender) -> str:
+    """Why this message must never be auto-replied to, or ``""``.
+
+    The single most important rule in the whole pipeline: **never answer
+    another bot.** Two bots replying to each other is an infinite loop that
+    runs at machine speed, and Telegram counts it against both accounts.
+    Telethon's ``User.bot`` flag is authoritative, but it is not the only
+    way a message can arrive from something that is not a person, so every
+    case is handled here rather than trusting one attribute.
+    """
+    if getattr(event, "via_bot_id", None):
+        return "sent through an inline bot"
+    if getattr(event, "post", False):
+        return "channel post"
+    if event.sender_id in _SERVICE_IDS:
+        return "Telegram service account"
+    if sender is None:
+        # Anonymous admins and channel-as-sender messages have no user.
+        return "no resolvable sender"
+    if not isinstance(sender, User):
+        return "sender is not a user account"
+    if getattr(sender, "bot", False):
+        return "sender is a bot"
+    if getattr(sender, "deleted", False):
+        return "deleted account"
+    if getattr(sender, "support", False):
+        return "Telegram support account"
+    if getattr(sender, "scam", False) or getattr(sender, "fake", False):
+        # Telegram itself has flagged this account. Never engage.
+        return "account flagged by Telegram"
+    username = (getattr(sender, "username", "") or "").lower()
+    if username.endswith("bot") and not is_contact(sender):
+        # A belt-and-braces check for the case where the bot flag did not
+        # come through on a cached entity. A saved contact is exempt so a
+        # person whose handle happens to end in "bot" is still answered.
+        return "username looks like a bot"
+    return ""
+
+
 async def _is_stranger(owner: int, event, sender) -> bool:
     """Is this somebody the owner has no relationship with?
 
@@ -48,7 +98,7 @@ async def _is_stranger(owner: int, event, sender) -> bool:
     """
     if not event.is_private:
         return False  # group access is already gated by the allow-list
-    if getattr(sender, "contact", False) or getattr(sender, "mutual_contact", False):
+    if is_contact(sender):
         return False
     history = await mongo.get_conversation(owner, event.sender_id, limit=1, is_group=False)
     return not history
@@ -118,7 +168,9 @@ async def _handle(client, event, *, owner: int, me_id: int, display_name: str) -
         return  # a wall of text is almost always a forward or a spam blast
 
     sender = await event.get_sender()
-    if isinstance(sender, User) and (sender.bot or sender.deleted):
+    skip = ignore_reason(event, sender)
+    if skip:
+        log.debug("ignoring message in %s: %s", event.chat_id, skip)
         return
     if await mongo.is_blacklisted(owner, event.sender_id):
         return
@@ -138,10 +190,13 @@ async def _handle(client, event, *, owner: int, me_id: int, display_name: str) -
         return
 
     stranger = await _is_stranger(owner, event, sender)
+    # Somebody in the owner's address book: no volume limits, only pacing.
+    contact = is_contact(sender) and not stranger
     limiter.note_incoming(event.chat_id, text)
     decision = limiter.check(
         event.chat_id,
         is_stranger=stranger,
+        is_contact=contact,
         incoming_text=text,
         quiet_hours=quiet,
     )
@@ -176,6 +231,7 @@ async def _handle(client, event, *, owner: int, me_id: int, display_name: str) -
                     is_group=is_group,
                     display_name=display_name,
                     stranger=stranger,
+                    contact=contact,
                 )
             )
             return
@@ -226,13 +282,20 @@ async def _handle(client, event, *, owner: int, me_id: int, display_name: str) -
 
 
 async def _answer_fragment_later(
-    client, event, *, owner: int, is_group: bool, display_name: str, stranger: bool = False
+    client,
+    event,
+    *,
+    owner: int,
+    is_group: bool,
+    display_name: str,
+    stranger: bool = False,
+    contact: bool = False,
 ) -> None:
     """Answer a held fragment once the user has clearly stopped typing."""
     await asyncio.sleep(FRAGMENT_GRACE_SECONDS)
 
     limiter = limiter_for(owner)
-    decision = limiter.check(event.chat_id, is_stranger=stranger)
+    decision = limiter.check(event.chat_id, is_stranger=stranger, is_contact=contact)
     if not decision.allowed:
         return
 
@@ -246,7 +309,13 @@ async def _answer_fragment_later(
         if not limiter.allow_text(event.chat_id, result.text).allowed:
             log.info("suppressed a duplicate fragment answer in %s", event.chat_id)
             return
-        await simulate_typing(client, event.chat_id, result.text, extra_delay=decision.extra_delay)
+        await simulate_typing(
+            client,
+            event.chat_id,
+            result.text,
+            source_text=event.text or "",
+            extra_delay=decision.extra_delay,
+        )
         await event.reply(result.text)
         limiter.record(event.chat_id, text=result.text, is_stranger=stranger)
         await mongo.increment_stat(owner, "total_replies")

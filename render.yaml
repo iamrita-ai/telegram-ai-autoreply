@@ -32,3 +32,10 @@ services:
         value: Asia/Kolkata
       - key: LOG_LEVEL
         value: INFO
+      # Render suspends a free web service after ~15 minutes with no inbound
+      # HTTP request, which would take the userbot offline mid-conversation.
+      # The service pings its own RENDER_EXTERNAL_URL to stay resident.
+      - key: KEEPALIVE
+        value: "true"
+      - key: KEEPALIVE_INTERVAL
+        value: "600"

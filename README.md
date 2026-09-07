@@ -274,11 +274,12 @@ Telegram restricts accounts that behave mechanically. This is the part most auto
 
 | Layer | What it stops |
 |---|---|
-| **Human typing** | Reads, pauses, types at human speed — never answers instantly |
-| **Per-chat cooldown** | Machine-gunning one conversation |
+| **Human typing** | Reads, pauses, types at human speed, **scaled to the length of the reply** — never answers instantly |
+| **Never answers a bot** | Two bots replying to each other at machine speed, which Telegram counts against both |
+| **Per-chat cooldown** | Machine-gunning one conversation _(not applied to your contacts)_ |
 | **Account-wide minimum gap** | A burst spread thinly over ten chats — Telegram judges the *account*, not the chat |
 | **Burst damping** | Speeding up exactly when you should slow down: every reply in the last 10 minutes adds delay, up to 45s |
-| **Volume caps** | Per chat, per hour, per day (`/limits` shows live usage) |
+| **Volume caps** | Per chat, per hour, per day (`/limits` shows live usage) _(not applied to your contacts)_ |
 | **New-chat pause** | Instant answers to someone who just messaged you for the first time |
 | **Stranger guardian** | Unknown senders wait ~25s, and get at most **3** replies before the bot stops and pings you |
 | **Stranger screening** | Auto-replying to scams, phishing, investment pitches, prize bait and link spam — a reply confirms your number is live |
@@ -299,6 +300,44 @@ The defaults are conservative on purpose. Every one is tunable in [`.env.example
 another's limits, and two users talking to the same contact are tracked
 separately.
 
+### Your contacts are not rate limited
+
+A volume cap exists so the account cannot spray messages at people who never
+asked for them. Somebody saved in your own contact list is the opposite of
+that, so contacts are exempt from the cooldown and from the per-chat, hourly
+and daily caps, and they get a much shorter pacing gap (`CONTACT_MIN_GAP`,
+2s) instead of the stranger-facing 8s. Set `CONTACT_UNLIMITED=false` to treat
+everyone identically.
+
+What still applies to contacts, because these protect the account rather than
+limit it: the account-wide pacing gap, the duplicate guard, the echo-loop
+guard, the one-reply-in-flight guard and FloodWait backoff.
+
+### Never answers another bot
+
+A bot answering a bot is an unbounded loop running at machine speed, and both
+accounts get flagged for it. The check is deliberately paranoid: Telethon's
+`bot` flag, deleted and support accounts, accounts Telegram has marked scam or
+fake, channel posts, anonymous admins, messages sent through an inline bot,
+Telegram's own service ids (777000 and friends), and a fallback on handles
+ending in `bot` for anybody who is not in your contacts. Scheduled greetings
+run the same check before sending. There is no setting to turn this off.
+
+### Delay follows the length of the message
+
+Reading, thinking and typing time are all computed from length, so the rhythm
+matches what is actually being sent:
+
+| Reply | Roughly |
+|---|---|
+| `ok` | ~2s |
+| a normal sentence | ~4s |
+| a full paragraph | ~15-20s |
+
+A fixed delay is wrong in both directions — it makes short answers feel dead
+and makes long ones look pre-written. Tune with `TYPING_SPEED`,
+`MIN_TYPING_TIME`, `MAX_TYPING_TIME`, `READING_SPEED` and `THINKING_SPEED`.
+
 > **Note:** automating a user account is against Telegram's Terms of Service. This project is for replying to your own conversations; the safety rails reduce risk but cannot eliminate it. Do not use it to send unsolicited messages.
 
 ---
@@ -314,6 +353,12 @@ Every setting is an environment variable, documented in [`.env.example`](.env.ex
 | `PER_CHAT_HOURLY_LIMIT` | `30` | Replies to one chat per hour |
 | `GLOBAL_DAILY_LIMIT` | `500` | Replies across all chats per day |
 | `GLOBAL_MIN_GAP` | `8.0` | Minimum seconds between any two outgoing messages |
+| `CONTACT_UNLIMITED` | `true` | Exempt saved contacts from every volume limit |
+| `CONTACT_MIN_GAP` | `2.0` | Pacing gap while talking to a contact |
+| `TYPING_SPEED` | `0.045` | Seconds per character — the reply-length delay curve |
+| `MAX_TYPING_TIME` | `18.0` | Ceiling on typing time for a very long reply |
+| `KEEPALIVE` | `true` | Ping the service's own URL so the host does not suspend it |
+| `KEEPALIVE_INTERVAL` | `600` | Seconds between keep-alive pings |
 | `STRANGER_MAX_REPLIES` | `3` | Replies an unknown sender can pull out of the account |
 | `STRANGER_SCREENING` | `true` | Refuse to auto-reply to scam and spam patterns |
 | `DUPLICATE_WINDOW` | `1800` | Seconds a sent message is remembered, to avoid repeats |
@@ -341,6 +386,28 @@ curl https://your-app.onrender.com/healthz
 
 It returns **503** when no account is signed in, so an uptime monitor catches a half-dead deploy instead of a green tick on a bot that stopped replying hours ago.
 
+### Staying awake
+
+Free hosting plans suspend a web service that has received no **inbound HTTP
+request** for about 15 minutes. Telegram traffic runs over an outbound socket
+and does not count, so an idle-looking service can be shut down in the middle
+of a conversation — in the logs that appears as `shutting down` / `bye` a few
+minutes after the last reply, with no error.
+
+The service therefore requests its own public URL every 10 minutes. On Render
+this is automatic: `RENDER_EXTERNAL_URL` is injected by the platform. Anywhere
+else, set `KEEPALIVE_URL` to the service's public address. The last ping is
+reported in `/healthz`:
+
+```json
+"keepalive": { "enabled": true, "url": "https://your-app.onrender.com/healthz",
+               "ok": true, "status": 200, "last": 1757251200.4 }
+```
+
+Note that this keeps the instance resident, so it consumes free instance hours
+continuously. An external uptime monitor pointed at `/healthz` works just as
+well if you would rather not self-ping.
+
 ---
 
 ## Project layout
@@ -363,7 +430,7 @@ handlers/
 database/mongo.py       storage, encryption, retention, per-user scoping
 assets/                 profile picture and /start banner
 scripts/                offline rich-message preview renderer
-tests/                  205 tests, no network required
+tests/                  248 tests, no network required
 ```
 
 ---
@@ -372,7 +439,7 @@ tests/                  205 tests, no network required
 
 ```bash
 pip install -r requirements.txt pytest pytest-asyncio ruff
-python -m pytest -q      # 205 tests, all offline
+python -m pytest -q      # 248 tests, all offline
 ruff check . && ruff format --check .
 ```
 
@@ -402,6 +469,25 @@ Check `/status` first:
 - In a group: the group must be in `/groups` **and** you must be mentioned
 - `/limits` at a cap → wait, or raise the cap
 - `/diag` showing every provider failing → your API key is wrong or out of quota
+</details>
+
+<details>
+<summary><b>The bot goes quiet after a few minutes, and the logs say "shutting down / bye"</b></summary>
+
+That is the host suspending an idle web service, not a crash. Telegram traffic
+does not count as activity — only inbound HTTP does. Keep-alive is on by
+default and pings `RENDER_EXTERNAL_URL` every 10 minutes; check the
+`keepalive` block in `/healthz`. If `enabled` is `false`, the platform did not
+supply a public URL, so set `KEEPALIVE_URL` yourself.
+</details>
+
+<details>
+<summary><b>Replies take too long, or come back too fast</b></summary>
+
+Delay is computed from the length of the reply, plus safety pacing. `/limits`
+shows the current burst penalty and whether a cap is being hit. Your saved
+contacts skip the caps and the cooldown entirely; strangers deliberately wait
+~25s. Tune the curve with `TYPING_SPEED` and `MAX_TYPING_TIME`.
 </details>
 
 <details>

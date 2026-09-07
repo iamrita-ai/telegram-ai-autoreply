@@ -232,7 +232,15 @@ def register(bot: TelegramClient, start_user_client) -> None:
             f"`{limits['per_chat_cooldown_s']}`s between replies\n"
             f"Account-wide gap: `{limits['global_min_gap_s']}`s minimum\n"
             f"Current burst penalty: `+{s['current_burst_penalty_s']}`s\n\n"
-            "🛡 **Stranger guardian**\n"
+            "👥 **Your contacts**\n"
+            + (
+                "No limits — people saved in your contact list are never "
+                "cooled down or capped. Only pacing, the duplicate guard and "
+                "the loop guard apply to them.\n\n"
+                if limits["contacts_exempt_from_limits"]
+                else "Limited like everyone else (`CONTACT_UNLIMITED=false`).\n\n"
+            )
+            + "🛡 **Stranger guardian**\n"
             f"Unknown senders answered: `{s['strangers_answered']}`\n"
             f"Max replies per stranger: `{limits['stranger_max_replies']}`\n"
             f"Screening: `{'on' if settings.stranger_screening else 'off'}`\n\n"
