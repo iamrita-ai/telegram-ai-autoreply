@@ -312,9 +312,9 @@ async def _call(provider: Provider, messages: list[dict[str, str]]) -> str | Non
     return None
 
 
-async def _complete(messages: list[dict[str, str]]) -> tuple[str | None, str]:
+async def _complete(messages: list[dict[str, str]], owner: int = 0) -> tuple[str | None, str]:
     """Try the preferred provider, then the rest. Returns (reply, provider)."""
-    preferred = await mongo.get_setting("preferred_model", "")
+    preferred = await mongo.get_user_setting(owner, "preferred_model", "")
     order: list[Provider] = []
     if preferred in PROVIDERS:
         order.append(PROVIDERS[preferred])
@@ -426,29 +426,30 @@ class ReplyResult:
 
 
 async def generate_reply(
-    user_id: int,
+    owner: int,
+    peer_id: int,
     message: str,
     *,
     is_group: bool = False,
     display_name: str = "",
 ) -> ReplyResult:
     """Produce one reply, or report that the message was buffered."""
-    pending = await mongo.get_pending(user_id)
+    pending = await mongo.get_pending(owner, peer_id)
 
     if seems_incomplete(message) and not pending:
         # First fragment: hold it and wait for the rest of the thought.
-        await mongo.add_pending(user_id, message)
+        await mongo.add_pending(owner, peer_id, message)
         return ReplyResult(None, buffered=True)
 
     if pending:
         message = " ".join([*pending, message]).strip()
-        await mongo.clear_pending(user_id)
+        await mongo.clear_pending(owner, peer_id)
 
-    persona_key = await mongo.get_persona_key()
-    custom_prompt = await mongo.get_prompt()
+    persona_key = await mongo.get_persona_key(owner)
+    custom_prompt = await mongo.get_prompt(owner)
     system_prompt = build_system_prompt(persona_key, custom_prompt, display_name=display_name)
 
-    history = await mongo.get_conversation(user_id, is_group=is_group)
+    history = await mongo.get_conversation(owner, peer_id, is_group=is_group)
     messages = [{"role": "system", "content": system_prompt}]
     messages += [
         {"role": h["role"], "content": h["content"]}
@@ -457,37 +458,37 @@ async def generate_reply(
     ]
     messages.append({"role": "user", "content": message})
 
-    reply, provider = await _complete(messages)
+    reply, provider = await _complete(messages, owner)
     if reply is None:
         return ReplyResult(None, failed=True)
 
-    await mongo.add_message(user_id, "user", message, is_group=is_group)
-    await mongo.add_message(user_id, "assistant", reply, is_group=is_group)
+    await mongo.add_message(owner, peer_id, "user", message, is_group=is_group)
+    await mongo.add_message(owner, peer_id, "assistant", reply, is_group=is_group)
     return ReplyResult(reply, provider=provider)
 
 
 async def flush_stale_fragment(
-    user_id: int, *, is_group: bool = False, display_name: str = ""
+    owner: int, peer_id: int, *, is_group: bool = False, display_name: str = ""
 ) -> ReplyResult:
     """Answer a fragment the user never finished.
 
     Called after a short grace period so "hey" still gets a reply when no
     follow-up arrives, instead of being silently swallowed.
     """
-    pending = await mongo.get_pending(user_id)
+    pending = await mongo.get_pending(owner, peer_id)
     if not pending:
         return ReplyResult(None)
-    await mongo.clear_pending(user_id)
+    await mongo.clear_pending(owner, peer_id)
 
-    persona_key = await mongo.get_persona_key()
-    custom_prompt = await mongo.get_prompt()
+    persona_key = await mongo.get_persona_key(owner)
+    custom_prompt = await mongo.get_prompt(owner)
     messages = [
         {
             "role": "system",
             "content": build_system_prompt(persona_key, custom_prompt, display_name=display_name),
         }
     ]
-    history = await mongo.get_conversation(user_id, is_group=is_group)
+    history = await mongo.get_conversation(owner, peer_id, is_group=is_group)
     messages += [
         {"role": h["role"], "content": h["content"]}
         for h in history
@@ -496,11 +497,11 @@ async def flush_stale_fragment(
     combined = " ".join(pending).strip()
     messages.append({"role": "user", "content": combined})
 
-    reply, provider = await _complete(messages)
+    reply, provider = await _complete(messages, owner)
     if reply is None:
         return ReplyResult(None, failed=True)
-    await mongo.add_message(user_id, "user", combined, is_group=is_group)
-    await mongo.add_message(user_id, "assistant", reply, is_group=is_group)
+    await mongo.add_message(owner, peer_id, "user", combined, is_group=is_group)
+    await mongo.add_message(owner, peer_id, "assistant", reply, is_group=is_group)
     return ReplyResult(reply, provider=provider)
 
 

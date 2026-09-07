@@ -376,19 +376,19 @@ async def test_greeting_is_skipped_when_every_provider_fails(monkeypatch) -> Non
         patch.object(scheduler.ai, "_complete", AsyncMock(return_value=(None, ""))),
         patch.object(scheduler.mongo, "get_persona_key", AsyncMock(return_value="casual")),
     ):
-        assert await scheduler._compose("morning", 1) is None
+        assert await scheduler._compose(1, "morning", 1) is None
 
 
 @pytest.mark.asyncio
 async def test_greeting_is_regenerated_when_the_model_repeats_itself(monkeypatch) -> None:
     monkeypatch.setattr(scheduler, "_RETRY_DELAY", 0)
-    scheduler._recent[7] = ["Good morning!"]
+    scheduler._recent[(1, 7)] = ["Good morning!"]
     replies = [("Good morning!", "p"), ("Morning — coffee first, then chaos.", "p")]
     with (
         patch.object(scheduler.ai, "_complete", AsyncMock(side_effect=replies)),
         patch.object(scheduler.mongo, "get_persona_key", AsyncMock(return_value="casual")),
     ):
-        result = await scheduler._compose("morning", 7)
+        result = await scheduler._compose(1, "morning", 7)
     assert result == "Morning — coffee first, then chaos."
     scheduler._recent.clear()
 
@@ -396,13 +396,13 @@ async def test_greeting_is_regenerated_when_the_model_repeats_itself(monkeypatch
 @pytest.mark.asyncio
 async def test_composer_tells_the_model_what_it_already_sent(monkeypatch) -> None:
     monkeypatch.setattr(scheduler, "_RETRY_DELAY", 0)
-    scheduler._recent[9] = ["Rise and shine!"]
+    scheduler._recent[(1, 9)] = ["Rise and shine!"]
     complete = AsyncMock(return_value=("Fresh line", "p"))
     with (
         patch.object(scheduler.ai, "_complete", complete),
         patch.object(scheduler.mongo, "get_persona_key", AsyncMock(return_value="casual")),
     ):
-        await scheduler._compose("morning", 9)
+        await scheduler._compose(1, "morning", 9)
     system_prompt = complete.call_args.args[0][0]["content"]
     assert "Rise and shine!" in system_prompt
     scheduler._recent.clear()
@@ -415,9 +415,9 @@ async def test_composer_tells_the_model_what_it_already_sent(monkeypatch) -> Non
 async def test_voice_is_off_by_default(monkeypatch) -> None:
     from core import voice
 
-    with patch.object(voice.mongo, "get_setting", AsyncMock(return_value=None)):
+    with patch.object(voice.mongo, "get_user_setting", AsyncMock(return_value=None)):
         monkeypatch.setattr(voice.settings, "voice_replies", False)
-        assert await voice.should_speak("Sure, see you at 8.") is False
+        assert await voice.should_speak(1, "Sure, see you at 8.") is False
 
 
 @pytest.mark.asyncio
@@ -425,9 +425,9 @@ async def test_voice_never_goes_to_a_stranger(monkeypatch) -> None:
     """Audio to someone unknown is intrusive and gets reported."""
     from core import voice
 
-    with patch.object(voice.mongo, "get_setting", AsyncMock(return_value=True)):
+    with patch.object(voice.mongo, "get_user_setting", AsyncMock(return_value=True)):
         monkeypatch.setattr(voice.settings, "voice_replies", True)
-        assert await voice.should_speak("Hi there", is_stranger=True) is False
+        assert await voice.should_speak(1, "Hi there", is_stranger=True) is False
 
 
 @pytest.mark.asyncio
@@ -435,29 +435,29 @@ async def test_long_replies_are_never_spoken(monkeypatch) -> None:
     """Groq's speech endpoint rejects input over 200 characters."""
     from core import voice
 
-    async def enabled(key, default=None):
+    async def enabled(owner, key, default=None):
         return {"voice_replies": True, "voice_chance": 1.0}.get(key, default)
 
     with (
-        patch.object(voice.mongo, "get_setting", AsyncMock(side_effect=enabled)),
+        patch.object(voice.mongo, "get_user_setting", AsyncMock(side_effect=enabled)),
         patch.object(voice.ai, "tts_available", lambda: True),
     ):
-        assert await voice.should_speak("x" * 201) is False
-        assert await voice.should_speak("Short and sweet.") is True
+        assert await voice.should_speak(1, "x" * 201) is False
+        assert await voice.should_speak(1, "Short and sweet.") is True
 
 
 @pytest.mark.asyncio
 async def test_multiline_replies_are_not_spoken(monkeypatch) -> None:
     from core import voice
 
-    async def enabled(key, default=None):
+    async def enabled(owner, key, default=None):
         return {"voice_replies": True, "voice_chance": 1.0}.get(key, default)
 
     with (
-        patch.object(voice.mongo, "get_setting", AsyncMock(side_effect=enabled)),
+        patch.object(voice.mongo, "get_user_setting", AsyncMock(side_effect=enabled)),
         patch.object(voice.ai, "tts_available", lambda: True),
     ):
-        assert await voice.should_speak("line one\nline two") is False
+        assert await voice.should_speak(1, "line one\nline two") is False
 
 
 @pytest.mark.asyncio
@@ -467,9 +467,9 @@ async def test_failed_synthesis_falls_back_to_text() -> None:
 
     with (
         patch.object(voice.ai, "synthesize", AsyncMock(return_value=None)),
-        patch.object(voice.mongo, "get_setting", AsyncMock(return_value=None)),
+        patch.object(voice.mongo, "get_user_setting", AsyncMock(return_value=None)),
     ):
-        assert await voice.send_as_voice(AsyncMock(), 1, "hello") is False
+        assert await voice.send_as_voice(1, AsyncMock(), 1, "hello") is False
 
 
 @pytest.mark.asyncio
@@ -479,9 +479,9 @@ async def test_ogg_is_sent_as_a_real_voice_note() -> None:
     client = AsyncMock()
     with (
         patch.object(voice.ai, "synthesize", AsyncMock(return_value=(b"OggS...", "ogg"))),
-        patch.object(voice.mongo, "get_setting", AsyncMock(return_value=None)),
+        patch.object(voice.mongo, "get_user_setting", AsyncMock(return_value=None)),
     ):
-        assert await voice.send_as_voice(client, 1, "hello") is True
+        assert await voice.send_as_voice(1, client, 1, "hello") is True
     assert client.send_file.call_args.kwargs["voice_note"] is True
 
 
@@ -493,9 +493,9 @@ async def test_wav_is_sent_as_an_audio_file_not_a_voice_note() -> None:
     client = AsyncMock()
     with (
         patch.object(voice.ai, "synthesize", AsyncMock(return_value=(b"RIFF...", "wav"))),
-        patch.object(voice.mongo, "get_setting", AsyncMock(return_value=None)),
+        patch.object(voice.mongo, "get_user_setting", AsyncMock(return_value=None)),
     ):
-        assert await voice.send_as_voice(client, 1, "hello") is True
+        assert await voice.send_as_voice(1, client, 1, "hello") is True
     assert client.send_file.call_args.kwargs["voice_note"] is False
 
 
@@ -560,7 +560,7 @@ async def test_a_stored_session_is_restored_without_asking_to_log_in() -> None:
     """A redeploy must not send the owner back to /login."""
     import main
 
-    records = ([{"user_id": 7, "session": "sess"}], [])
+    records = ([{"owner_id": 7, "session": "sess"}], [])
     with (
         patch.object(main.mongo, "load_session_records", AsyncMock(return_value=records)),
         patch.object(main.mongo, "delete_session", AsyncMock()) as delete,
@@ -580,29 +580,29 @@ async def test_an_undecryptable_session_is_deleted_and_reported() -> None:
     with (
         patch.object(main.mongo, "load_session_records", AsyncMock(return_value=([], [7]))),
         patch.object(main.mongo, "delete_session", AsyncMock()) as delete,
-        patch.object(main, "_notify_owners", AsyncMock()) as notify,
+        patch.object(main, "_notify", AsyncMock()) as notify,
     ):
         await main.start_user_client()
     delete.assert_awaited_once_with(7)
-    assert "ENCRYPTION_KEY" in notify.call_args.args[0]
+    assert "ENCRYPTION_KEY" in notify.call_args.args[1]
 
 
 @pytest.mark.asyncio
 async def test_a_revoked_session_is_deleted_so_login_can_replace_it() -> None:
     import main
 
-    records = ([{"user_id": 7, "session": "sess"}], [])
+    records = ([{"owner_id": 7, "session": "sess"}], [])
     with (
         patch.object(main.mongo, "load_session_records", AsyncMock(return_value=records)),
         patch.object(main.mongo, "delete_session", AsyncMock()) as delete,
         patch.object(main, "_launch", AsyncMock(return_value="dead")),
-        patch.object(main, "_notify_owners", AsyncMock()) as notify,
+        patch.object(main, "_notify", AsyncMock()) as notify,
         patch.object(main, "TelegramClient", lambda *a, **k: AsyncMock()),
         patch.object(main, "StringSession", lambda *a, **k: object()),
     ):
         await main.start_user_client()
     delete.assert_awaited_once_with(7)
-    assert "/login" in notify.call_args.args[0]
+    assert "/login" in notify.call_args.args[1]
 
 
 @pytest.mark.asyncio
@@ -610,7 +610,7 @@ async def test_a_network_blip_never_deletes_a_good_session() -> None:
     """Deleting on a transient error would log the user out for nothing."""
     import main
 
-    records = ([{"user_id": 7, "session": "sess"}], [])
+    records = ([{"owner_id": 7, "session": "sess"}], [])
     with (
         patch.object(main.mongo, "load_session_records", AsyncMock(return_value=records)),
         patch.object(main.mongo, "delete_session", AsyncMock()) as delete,
@@ -629,7 +629,7 @@ async def test_transient_connect_errors_are_retryable_not_fatal() -> None:
     client = AsyncMock()
     client.is_connected = lambda: False
     client.connect = AsyncMock(side_effect=OSError("network unreachable"))
-    assert await main._launch(client) == "retry"
+    assert await main._launch(client, 7) == "retry"
 
 
 @pytest.mark.asyncio
@@ -639,7 +639,7 @@ async def test_an_unauthorised_session_is_dead() -> None:
     client = AsyncMock()
     client.is_connected = lambda: True
     client.is_user_authorized = AsyncMock(return_value=False)
-    assert await main._launch(client) == "dead"
+    assert await main._launch(client, 7) == "dead"
 
 
 @pytest.mark.asyncio
@@ -647,11 +647,11 @@ async def test_a_corrupt_session_string_does_not_crash_startup() -> None:
     """Telethon raises ValueError on a truncated string; boot must survive."""
     import main
 
-    records = ([{"user_id": 7, "session": "truncated"}], [])
+    records = ([{"owner_id": 7, "session": "truncated"}], [])
     with (
         patch.object(main.mongo, "load_session_records", AsyncMock(return_value=records)),
         patch.object(main.mongo, "delete_session", AsyncMock()) as delete,
-        patch.object(main, "_notify_owners", AsyncMock()),
+        patch.object(main, "_notify", AsyncMock()),
     ):
         await main.start_user_client()  # real StringSession, real ValueError
     delete.assert_awaited_once_with(7)

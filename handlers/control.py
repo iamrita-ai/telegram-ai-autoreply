@@ -12,6 +12,7 @@ Security notes, both of them real problems in the previous version:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import logging
 import re
@@ -27,10 +28,10 @@ from telethon.errors import (
 from telethon.sessions import StringSession
 
 from config import settings
-from core import voice
+from core import safety, voice
 from core.personas import persona_choices
 from core.rich import RichMessage, demo_message, send_rich
-from core.safety import limiter
+from core.safety import forget_limiter, limiter_for
 from database import mongo
 from handlers import ai
 
@@ -50,15 +51,40 @@ _user_clients: dict[int, TelegramClient] = {}
 _start_user_client = None
 
 
-def set_user_client(client: TelegramClient, user_id: int) -> None:
-    _user_clients[user_id] = client
+def set_user_client(client: TelegramClient, owner: int) -> None:
+    """Remember the running client for one owner."""
+    _user_clients[owner] = client
 
 
 def get_user_clients() -> dict[int, TelegramClient]:
     return _user_clients
 
 
-def _owner_only(handler):
+def _registered(handler):
+    """Any Telegram user may use the bot - each one gets their own space.
+
+    The caller's id is the ``owner`` every command scopes its data to, so
+    two people can never read or change each other's settings.
+    """
+
+    async def wrapper(event):
+        owner = event.sender_id
+        if await mongo.is_banned(owner):
+            return
+        sender = await event.get_sender()
+        await mongo.register_user(
+            owner,
+            username=getattr(sender, "username", None),
+            name=getattr(sender, "first_name", None),
+        )
+        return await handler(event)
+
+    return wrapper
+
+
+def _admin_only(handler):
+    """Only the ids in OWNER_IDS - operator commands, not user commands."""
+
     async def wrapper(event):
         if not settings.is_owner(event.sender_id):
             return
@@ -103,53 +129,81 @@ def register(bot: TelegramClient, start_user_client) -> None:
 
     # ── status ────────────────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/start$"))
-    @_owner_only
+    @_registered
     async def cmd_start(event):
-        sessions = await mongo.load_all_sessions()
-        signed_in = bool(sessions)
+        session = await mongo.load_session(event.sender_id)
+        signed_in = bool(session)
         state = (
-            f"🟢 {len(sessions)} account(s) signed in"
+            "🟢 Your account is connected"
             if signed_in
-            else "🔴 No account signed in — send /login"
+            else "🔴 No account connected yet — send /login"
         )
         message = (
             RichMessage()
-            .bold("Serena · Auto-Reply Control Panel")
+            .bold("Serena · your AI auto-reply")
             .newline(2)
             .text_(state)
             .newline(2)
             .quote(
                 "I answer your Telegram messages in your own voice while you "
-                "are away, and I pace myself so the account stays safe.",
+                "are away, and I pace myself so your account stays safe."
             )
             .newline(2)
-            .text_("Next: ")
-            .code("/login" if not signed_in else "/status")
-            .text_("   ·   full list: ")
-            .code("/help")
         )
+        if not signed_in:
+            message = (
+                message.bold("How it works")
+                .newline()
+                .text_("1. ")
+                .code("/login")
+                .text_(" — connect your Telegram account\n")
+                .text_("2. ")
+                .code("/persona")
+                .text_(" — pick Professional, Casual or Romantic\n")
+                .text_("3. Go about your day. I reply for you.\n")
+                .newline()
+                .quote(
+                    "Please read before connecting: automating a user account "
+                    "is against Telegram's Terms of Service. This is meant for "
+                    "answering your own conversations, never for sending "
+                    "unsolicited messages. Your session is encrypted, only you "
+                    "can control it, and /deleteme erases everything. You use "
+                    "it at your own risk.",
+                    expandable=True,
+                )
+                .newline(2)
+                .text_("Ready? Send ")
+                .code("/login")
+                .text_("   ·   everything else: ")
+                .code("/help")
+            )
+        else:
+            message = (
+                message.text_("Next: ").code("/status").text_("   ·   full list: ").code("/help")
+            )
         banner = START_IMAGE if START_IMAGE.exists() else None
         await send_rich(bot, event.chat_id, message, file=banner)
 
     @bot.on(events.NewMessage(pattern=r"^/status$"))
-    @_owner_only
+    @_registered
     async def cmd_status(event):
-        locked = await mongo.is_locked()
-        persona_key = await mongo.get_persona_key()
-        custom = await mongo.get_prompt()
-        model = await mongo.get_setting("preferred_model", "auto")
-        dnd = await mongo.get_dnd()
-        total = await mongo.get_stat("total_replies")
-        today = await mongo.get_today_count()
-        sessions = await mongo.load_all_sessions()
-        stats = limiter.snapshot()
+        owner = event.sender_id
+        locked = await mongo.is_locked(owner)
+        persona_key = await mongo.get_persona_key(owner)
+        custom = await mongo.get_prompt(owner)
+        model = await mongo.get_user_setting(owner, "preferred_model", "auto")
+        dnd = await mongo.get_dnd(owner)
+        total = await mongo.get_stat(owner, "total_replies")
+        today = await mongo.get_today_count(owner)
+        session = await mongo.load_session(owner)
+        stats = limiter_for(owner).snapshot()
 
         label = ai.PROVIDERS[model].label if model in ai.PROVIDERS else "Automatic"
         await _say(
             event,
             "⚡ **Status**\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔑 Accounts: `{len(sessions)}`\n"
+            f"🔑 Account: {'connected' if session else 'not connected'}\n"
             f"🔒 Replies: {'🔴 paused' if locked else '🟢 active'}\n"
             f"🎭 Persona: `{persona_key}`{' (custom prompt)' if custom else ''}\n"
             f"🤖 Model: {label}\n"
@@ -163,9 +217,9 @@ def register(bot: TelegramClient, start_user_client) -> None:
         )
 
     @bot.on(events.NewMessage(pattern=r"^/limits$"))
-    @_owner_only
+    @_registered
     async def cmd_limits(event):
-        s = limiter.snapshot()
+        s = limiter_for(event.sender_id).snapshot()
         limits = s["limits"]
         await _say(
             event,
@@ -194,7 +248,7 @@ def register(bot: TelegramClient, start_user_client) -> None:
         )
 
     @bot.on(events.NewMessage(pattern=r"^/diag$"))
-    @_owner_only
+    @_registered
     async def cmd_diag(event):
         message = await event.respond("🩺 Testing AI providers…")
         results = await ai.smoke_test()
@@ -212,9 +266,10 @@ def register(bot: TelegramClient, start_user_client) -> None:
 
     # ── persona ───────────────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/persona$"))
-    @_owner_only
+    @_registered
     async def cmd_persona(event):
-        current = await mongo.get_persona_key()
+        owner = event.sender_id
+        current = await mongo.get_persona_key(owner)
         buttons = [
             [
                 Button.inline(
@@ -236,10 +291,10 @@ def register(bot: TelegramClient, start_user_client) -> None:
 
     @bot.on(events.CallbackQuery(pattern=rb"^persona:(.+)$"))
     async def cb_persona(event):
-        if not settings.is_owner(event.sender_id):
+        if await mongo.is_banned(event.sender_id):
             return
         key = event.data.decode().split(":", 1)[1]
-        await mongo.set_persona_key(key)
+        await mongo.set_persona_key(event.sender_id, key)
         await event.answer("Personality updated")
         await event.edit(
             f"✅ **Personality set to `{key}`.**\n\n"
@@ -249,7 +304,7 @@ def register(bot: TelegramClient, start_user_client) -> None:
 
     # ── model ─────────────────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/model$"))
-    @_owner_only
+    @_registered
     async def cmd_model(event):
         providers = ai.available_providers()
         if not providers:
@@ -259,7 +314,7 @@ def register(bot: TelegramClient, start_user_client) -> None:
                 "Set `GROQ_API_KEY`, `SAMBANOVA_API_KEY` or `NVIDIA_API_KEY`.",
             )
             return
-        current = await mongo.get_setting("preferred_model", "auto")
+        current = await mongo.get_user_setting(event.sender_id, "preferred_model", "auto")
         buttons = [
             [Button.inline(f"{p.label}{' ✅' if p.key == current else ''}", data=f"model:{p.key}")]
             for p in providers
@@ -275,22 +330,24 @@ def register(bot: TelegramClient, start_user_client) -> None:
 
     @bot.on(events.CallbackQuery(pattern=rb"^model:(.+)$"))
     async def cb_model(event):
-        if not settings.is_owner(event.sender_id):
+        if await mongo.is_banned(event.sender_id):
             return
         key = event.data.decode().split(":", 1)[1]
-        await mongo.set_setting("preferred_model", "" if key == "auto" else key)
+        await mongo.set_user_setting(
+            event.sender_id, "preferred_model", "" if key == "auto" else key
+        )
         label = ai.PROVIDERS[key].label if key in ai.PROVIDERS else "Automatic"
         await event.answer("Model updated")
         await event.edit(f"✅ **Model:** {label}", parse_mode="markdown")
 
     # ── login ─────────────────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/login$"))
-    @_owner_only
+    @_registered
     async def cmd_login(event):
         old = _pending.pop(event.sender_id, None)
         if old:
             with_suppressed(old.disconnect())
-        await mongo.set_login_state({"step": "phone"})
+        await mongo.set_login_state(event.sender_id, {"step": "phone"})
         await _say(
             event,
             "📱 **Sign in — step 1 of 3**\n\n"
@@ -300,22 +357,22 @@ def register(bot: TelegramClient, start_user_client) -> None:
         )
 
     @bot.on(events.NewMessage(pattern=r"^/cancel$"))
-    @_owner_only
+    @_registered
     async def cmd_cancel(event):
         client = _pending.pop(event.sender_id, None)
         if client:
             with_suppressed(client.disconnect())
-        await mongo.set_login_state(None)
+        await mongo.set_login_state(event.sender_id, None)
         await _say(event, "✅ Cancelled.")
 
     @bot.on(events.NewMessage())
     async def login_steps(event):
         """Multi-step login. Only active while a login is in progress."""
-        if not settings.is_owner(event.sender_id):
+        if await mongo.is_banned(event.sender_id):
             return
         if not event.text or event.text.startswith("/"):
             return
-        state = await mongo.get_login_state()
+        state = await mongo.get_login_state(event.sender_id)
         if not state:
             return
 
@@ -337,17 +394,19 @@ def register(bot: TelegramClient, start_user_client) -> None:
             sent = await client.send_code_request(phone)
         except FloodWaitError as exc:
             await client.disconnect()
-            await mongo.set_login_state(None)
+            await mongo.set_login_state(event.sender_id, None)
             await _say(event, f"⏳ **Too many attempts.** Try again in `{exc.seconds}`s.")
             return
         except Exception as exc:
             await client.disconnect()
-            await mongo.set_login_state(None)
+            await mongo.set_login_state(event.sender_id, None)
             await _say(event, f"❌ Could not send the code: `{exc}`\n\nSend /login to retry.")
             return
 
         _pending[event.sender_id] = client
-        await mongo.set_login_state({"step": "otp", "phone": phone, "hash": sent.phone_code_hash})
+        await mongo.set_login_state(
+            event.sender_id, {"step": "otp", "phone": phone, "hash": sent.phone_code_hash}
+        )
         await _say(
             event,
             "✅ **Code sent — step 2 of 3**\n\n"
@@ -365,7 +424,7 @@ def register(bot: TelegramClient, start_user_client) -> None:
 
         client = _pending.get(event.sender_id)
         if client is None or not client.is_connected():
-            await mongo.set_login_state(None)
+            await mongo.set_login_state(event.sender_id, None)
             _pending.pop(event.sender_id, None)
             await _say(event, "⚠️ **The login expired.** Send /login to start again.")
             return
@@ -373,7 +432,9 @@ def register(bot: TelegramClient, start_user_client) -> None:
         try:
             await client.sign_in(state["phone"], code, phone_code_hash=state["hash"])
         except SessionPasswordNeededError:
-            await mongo.set_login_state({"step": "password", "phone": state["phone"]})
+            await mongo.set_login_state(
+                event.sender_id, {"step": "password", "phone": state["phone"]}
+            )
             await _say(
                 event,
                 "🔐 **Two-step verification — step 3 of 3**\n\n"
@@ -382,7 +443,7 @@ def register(bot: TelegramClient, start_user_client) -> None:
             )
             return
         except (PhoneCodeInvalidError, PhoneCodeExpiredError) as exc:
-            await mongo.set_login_state(None)
+            await mongo.set_login_state(event.sender_id, None)
             _pending.pop(event.sender_id, None)
             with_suppressed(client.disconnect())
             reason = (
@@ -393,7 +454,7 @@ def register(bot: TelegramClient, start_user_client) -> None:
             await _say(event, f"❌ Sign-in failed — {reason}. Send /login to retry.")
             return
         except Exception as exc:
-            await mongo.set_login_state(None)
+            await mongo.set_login_state(event.sender_id, None)
             _pending.pop(event.sender_id, None)
             with_suppressed(client.disconnect())
             await _say(event, f"❌ Sign-in failed: `{exc}`\n\nSend /login to retry.")
@@ -406,13 +467,13 @@ def register(bot: TelegramClient, start_user_client) -> None:
         await _delete_secret(event)
         client = _pending.get(event.sender_id)
         if client is None or not client.is_connected():
-            await mongo.set_login_state(None)
+            await mongo.set_login_state(event.sender_id, None)
             await _say(event, "⚠️ **The login expired.** Send /login to start again.")
             return
         try:
             await client.sign_in(password=password)
         except Exception as exc:
-            await mongo.set_login_state(None)
+            await mongo.set_login_state(event.sender_id, None)
             _pending.pop(event.sender_id, None)
             with_suppressed(client.disconnect())
             await _say(event, f"❌ Wrong password: `{exc}`\n\nSend /login to try again.")
@@ -421,8 +482,8 @@ def register(bot: TelegramClient, start_user_client) -> None:
 
     async def _finish_login(event, client: TelegramClient) -> None:
         me = await client.get_me()
-        await mongo.save_session(client.session.save(), user_id=me.id)
-        await mongo.set_login_state(None)
+        await mongo.save_session(event.sender_id, client.session.save(), account_id=me.id)
+        await mongo.set_login_state(event.sender_id, None)
         _pending.pop(event.sender_id, None)
         await _say(
             event,
@@ -432,68 +493,69 @@ def register(bot: TelegramClient, start_user_client) -> None:
             "⏳ Starting the auto-reply…",
         )
         try:
-            await _start_user_client(existing_client=client, me=me)
+            await _start_user_client(existing_client=client, me=me, owner=event.sender_id)
             await _say(event, "🚀 **Auto-reply is running.**")
         except Exception as exc:
             log.exception("could not start the userbot after login")
             await _say(event, f"⚠️ Signed in, but starting failed: `{exc}`")
 
     @bot.on(events.NewMessage(pattern=r"^/logout$"))
-    @_owner_only
+    @_registered
     async def cmd_logout(event):
-        if not _user_clients:
-            await mongo.delete_session()
-            await _say(event, "👋 No account was running. Stored sessions cleared.")
-            return
-        for user_id, client in list(_user_clients.items()):
+        owner = event.sender_id
+        client = _user_clients.pop(owner, None)
+        if client is not None:
             try:
                 await client.log_out()
             except Exception:
-                log.warning("log_out failed for %s", user_id)
-            await mongo.delete_session(user_id)
-            _user_clients.pop(user_id, None)
-        await _say(event, "👋 **Signed out.** Sessions deleted.")
+                log.warning("log_out failed for %s", owner)
+        removed = await mongo.delete_session(owner)
+        forget_limiter(owner)
+        if not client and not removed:
+            await _say(event, "👋 You had no account connected.")
+            return
+        await _say(event, "👋 **Signed out.** Your session has been deleted.")
 
     # ── behaviour ─────────────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/pause$"))
-    @_owner_only
+    @_registered
     async def cmd_pause(event):
-        await mongo.set_setting("locked", True)
+        await mongo.set_user_setting(event.sender_id, "locked", True)
         await _say(event, "🔒 **Paused.** No auto-replies until /resume.")
 
     @bot.on(events.NewMessage(pattern=r"^/resume$"))
-    @_owner_only
+    @_registered
     async def cmd_resume(event):
-        await mongo.set_setting("locked", False)
+        await mongo.set_user_setting(event.sender_id, "locked", False)
         await _say(event, "🔓 **Resumed.** Auto-replies are active.")
 
     @bot.on(events.NewMessage(pattern=r"^/prompt(?:\s+([\s\S]+))?$"))
-    @_owner_only
+    @_registered
     async def cmd_prompt(event):
         text = (event.pattern_match.group(1) or "").strip()
         if not text:
-            current = await mongo.get_prompt()
+            current = await mongo.get_prompt(event.sender_id)
             await _say(
                 event,
                 f"📝 **Custom prompt**\n\n{current or '_none — using the persona_'}\n\n"
                 "Set one with `/prompt <text>`, remove it with /clearprompt.",
             )
             return
-        await mongo.set_setting("prompt", text)
+        await mongo.set_user_setting(event.sender_id, "prompt", text)
         await _say(event, "✅ Custom prompt saved. It overrides the persona.")
 
     @bot.on(events.NewMessage(pattern=r"^/clearprompt$"))
-    @_owner_only
+    @_registered
     async def cmd_clearprompt(event):
-        await mongo.set_setting("prompt", None)
-        persona = await mongo.get_persona_key()
+        await mongo.set_user_setting(event.sender_id, "prompt", None)
+        persona = await mongo.get_persona_key(event.sender_id)
         await _say(event, f"✅ Custom prompt removed. Back to the `{persona}` persona.")
 
     @bot.on(events.NewMessage(pattern=r"^/quiet\s+(\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2})$"))
-    @_owner_only
+    @_registered
     async def cmd_quiet(event):
         window = event.pattern_match.group(1).replace(" ", "")
-        await mongo.set_dnd(window)
+        await mongo.set_dnd(event.sender_id, window)
         await _say(
             event,
             f"😴 **Quiet hours set:** `{window}` ({settings.timezone})\n"
@@ -501,38 +563,38 @@ def register(bot: TelegramClient, start_user_client) -> None:
         )
 
     @bot.on(events.NewMessage(pattern=r"^/quietoff$"))
-    @_owner_only
+    @_registered
     async def cmd_quietoff(event):
-        await mongo.set_dnd(None)
+        await mongo.set_dnd(event.sender_id, None)
         await _say(event, "✅ Quiet hours off.")
 
     # ── people and groups ─────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/block\s+(\d+)$"))
-    @_owner_only
+    @_registered
     async def cmd_block(event):
         uid = int(event.pattern_match.group(1))
-        await mongo.blacklist_user(uid)
+        await mongo.blacklist_user(event.sender_id, uid)
         await _say(event, f"🚫 `{uid}` will no longer get replies.")
 
     @bot.on(events.NewMessage(pattern=r"^/unblock\s+(\d+)$"))
-    @_owner_only
+    @_registered
     async def cmd_unblock(event):
         uid = int(event.pattern_match.group(1))
-        await mongo.unblacklist_user(uid)
+        await mongo.unblacklist_user(event.sender_id, uid)
         await _say(event, f"✅ `{uid}` can get replies again.")
 
     @bot.on(events.NewMessage(pattern=r"^/blocked$"))
-    @_owner_only
+    @_registered
     async def cmd_blocked(event):
-        blocked = await mongo.list_blacklisted()
+        blocked = await mongo.list_blacklisted(event.sender_id)
         body = "\n".join(f"• `{u}`" for u in blocked) if blocked else "_nobody_"
         await _say(event, f"🚫 **Blocked ({len(blocked)})**\n{body}")
 
     @bot.on(events.NewMessage(pattern=r"^/allowgroup\s+(-?\d+)$"))
-    @_owner_only
+    @_registered
     async def cmd_allowgroup(event):
         gid = int(event.pattern_match.group(1))
-        await mongo.allow_group(gid)
+        await mongo.allow_group(event.sender_id, gid)
         await _say(
             event,
             f"✅ **Group allowed:** `{gid}`\n"
@@ -540,32 +602,32 @@ def register(bot: TelegramClient, start_user_client) -> None:
         )
 
     @bot.on(events.NewMessage(pattern=r"^/disallowgroup\s+(-?\d+)$"))
-    @_owner_only
+    @_registered
     async def cmd_disallowgroup(event):
         gid = int(event.pattern_match.group(1))
-        await mongo.disallow_group(gid)
+        await mongo.disallow_group(event.sender_id, gid)
         await _say(event, f"❌ Group `{gid}` removed.")
 
     @bot.on(events.NewMessage(pattern=r"^/groups$"))
-    @_owner_only
+    @_registered
     async def cmd_groups(event):
-        groups = await mongo.list_allowed_groups()
+        groups = await mongo.list_allowed_groups(event.sender_id)
         body = "\n".join(f"• `{g}`" for g in groups) if groups else "_none_"
         await _say(event, f"👥 **Allowed groups ({len(groups)})**\n{body}")
 
     # ── history ───────────────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/forget\s+(\d+)$"))
-    @_owner_only
+    @_registered
     async def cmd_forget(event):
         uid = int(event.pattern_match.group(1))
-        removed = await mongo.clear_history(uid)
+        removed = await mongo.clear_history(event.sender_id, uid)
         await _say(event, f"🗑 Cleared `{removed}` messages for `{uid}`.")
 
     @bot.on(events.NewMessage(pattern=r"^/forgetall$"))
-    @_owner_only
+    @_registered
     async def cmd_forgetall(event):
-        removed = await mongo.clear_all_history()
-        await _say(event, f"🗑 Cleared `{removed}` messages for every chat.")
+        removed = await mongo.clear_all_history(event.sender_id)
+        await _say(event, f"🗑 Cleared `{removed}` messages across your chats.")
 
     # ── schedules ─────────────────────────────────────────────────────────
     @bot.on(
@@ -573,39 +635,39 @@ def register(bot: TelegramClient, start_user_client) -> None:
             pattern=r"^/schedule\s+(\d+)\s+(morning|afternoon|night)\s+(\d{1,2}:\d{2})$"
         )
     )
-    @_owner_only
+    @_registered
     async def cmd_schedule(event):
         uid = int(event.pattern_match.group(1))
         kind = event.pattern_match.group(2)
         when = event.pattern_match.group(3)
-        await mongo.add_schedule(uid, kind, when)
+        await mongo.add_schedule(event.sender_id, uid, kind, when)
         await _say(
             event,
             f"📅 Daily **{kind}** message to `{uid}` at `{when}` ({settings.timezone}).",
         )
 
     @bot.on(events.NewMessage(pattern=r"^/unschedule\s+(\d+)\s+(morning|afternoon|night)$"))
-    @_owner_only
+    @_registered
     async def cmd_unschedule(event):
         uid = int(event.pattern_match.group(1))
         kind = event.pattern_match.group(2)
-        await mongo.remove_schedule(uid, kind)
+        await mongo.remove_schedule(event.sender_id, uid, kind)
         await _say(event, f"❌ Removed the {kind} message for `{uid}`.")
 
     @bot.on(events.NewMessage(pattern=r"^/schedules$"))
-    @_owner_only
+    @_registered
     async def cmd_schedules(event):
-        rows = await mongo.get_active_schedules()
+        rows = await mongo.get_active_schedules(event.sender_id)
         if not rows:
             await _say(event, "📅 **Scheduled messages:** _none_")
             return
-        body = "\n".join(f"• `{r['user_id']}` — {r['type']} at `{r['time']}`" for r in rows)
+        body = "\n".join(f"• `{r['target_id']}` — {r['type']} at `{r['time']}`" for r in rows)
         await _say(event, f"📅 **Scheduled messages ({len(rows)})**\n{body}")
 
     # ── help ──────────────────────────────────────────────────────────────
     # ── rich messages ─────────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/rich(?:\s+(-?\d+))?$"))
-    @_owner_only
+    @_registered
     async def cmd_rich(event):
         """Show the rich-message sample, here or in a real chat."""
         target = event.pattern_match.group(1)
@@ -621,11 +683,10 @@ def register(bot: TelegramClient, start_user_client) -> None:
             return
 
         chat_id = int(target)
-        clients = get_user_clients()
-        if not clients:
-            await _say(event, "🔴 No account is signed in. Send /login first.")
+        user_client = _user_clients.get(event.sender_id)
+        if user_client is None:
+            await _say(event, "🔴 Your account is not connected. Send /login first.")
             return
-        user_client = next(iter(clients.values()))
         try:
             await send_rich(user_client, chat_id, demo_message())
         except Exception as exc:
@@ -640,10 +701,10 @@ def register(bot: TelegramClient, start_user_client) -> None:
 
     # ── voice replies ─────────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/voice(?:\s+([\s\S]+))?$"))
-    @_owner_only
+    @_registered
     async def cmd_voice(event):
         argument = (event.pattern_match.group(1) or "").strip().lower()
-        state = await voice.settings_summary()
+        state = await voice.settings_summary(event.sender_id)
 
         if not argument:
             await _say(
@@ -666,7 +727,7 @@ def register(bot: TelegramClient, start_user_client) -> None:
             return
 
         if argument in ("on", "off"):
-            await mongo.set_setting("voice_replies", argument == "on")
+            await mongo.set_user_setting(event.sender_id, "voice_replies", argument == "on")
             await _say(event, f"🎙 Voice replies are now **{argument}**.")
             return
 
@@ -677,7 +738,7 @@ def register(bot: TelegramClient, start_user_client) -> None:
                 await _say(event, "Use `/voice chance 25` — a percentage from 0 to 100.")
                 return
             percent = max(0, min(100, percent))
-            await mongo.set_setting("voice_chance", percent / 100)
+            await mongo.set_user_setting(event.sender_id, "voice_chance", percent / 100)
             await _say(event, f"🎙 `{percent}%` of eligible replies will be spoken.")
             return
 
@@ -686,7 +747,7 @@ def register(bot: TelegramClient, start_user_client) -> None:
             if len(parts) < 2 or parts[1] not in ai.TTS_VOICES:
                 await _say(event, "Pick one of: `" + "` · `".join(ai.TTS_VOICES) + "`")
                 return
-            await mongo.set_setting("voice_name", parts[1])
+            await mongo.set_user_setting(event.sender_id, "voice_name", parts[1])
             await _say(event, f"🎙 Voice set to `{parts[1]}`.")
             return
 
@@ -694,7 +755,7 @@ def register(bot: TelegramClient, start_user_client) -> None:
             body = (event.pattern_match.group(1) or "")[4:].strip()
             body = body or "Hey, this is how I sound when I answer for you."
             note = await event.respond("🎙 Generating…")
-            sent = await voice.send_as_voice(bot, event.chat_id, body)
+            sent = await voice.send_as_voice(event.sender_id, bot, event.chat_id, body)
             await note.delete()
             if not sent:
                 await _say(
@@ -711,18 +772,123 @@ def register(bot: TelegramClient, start_user_client) -> None:
 
     # ── stranger guardian ─────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/trust\s+(-?\d+)$"))
-    @_owner_only
+    @_registered
     async def cmd_trust(event):
         chat_id = int(event.pattern_match.group(1))
-        limiter.trust(chat_id)
+        limiter_for(event.sender_id).trust(chat_id)
         await _say(
             event,
             f"✅ `{chat_id}` is no longer treated as a stranger — "
             "the reply cap and the extra delay are lifted for it.",
         )
 
+    # ── privacy ───────────────────────────────────────────────────────────
+    @bot.on(events.NewMessage(pattern=r"^/deleteme(?:\s+(CONFIRM))?$"))
+    @_registered
+    async def cmd_deleteme(event):
+        """Erase everything belonging to this user."""
+        if not event.pattern_match.group(1):
+            await _say(
+                event,
+                "⚠️ **This deletes everything.**\n\n"
+                "Your session, settings, schedules, blocked list and all stored "
+                "conversation history — permanently, with no way back.\n\n"
+                "Send `/deleteme CONFIRM` if you are sure.",
+            )
+            return
+
+        owner = event.sender_id
+        client = _user_clients.pop(owner, None)
+        if client is not None:
+            with contextlib.suppress(Exception):
+                await client.log_out()
+        forget_limiter(owner)
+        removed = await mongo.forget_user(owner)
+        await _say(
+            event,
+            "🗑 **Everything has been deleted.**\n"
+            + (
+                "\n".join(f"· {name}: `{count}`" for name, count in removed.items())
+                or "_nothing was stored_"
+            )
+            + "\n\nSend /start if you ever want to come back.",
+        )
+
+    # ── admin ─────────────────────────────────────────────────────────────
+    @bot.on(events.NewMessage(pattern=r"^/users$"))
+    @_admin_only
+    async def cmd_users(event):
+        users = await mongo.list_users()
+        running = len(_user_clients)
+        lines = []
+        for row in users[-25:]:
+            handle = f"@{row['username']}" if row.get("username") else row.get("name") or "?"
+            mark = "🟢" if row["owner_id"] in _user_clients else "⚪"
+            banned = " 🚫" if row.get("banned") else ""
+            lines.append(f"{mark} `{row['owner_id']}` {handle}{banned}")
+        await _say(
+            event,
+            f"👥 **Users ({len(users)})** · `{running}` connected\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            + ("\n".join(lines) or "_nobody yet_")
+            + ("\n\n_showing the 25 most recent_" if len(users) > 25 else ""),
+        )
+
+    @bot.on(events.NewMessage(pattern=r"^/gstats$"))
+    @_admin_only
+    async def cmd_gstats(event):
+        total = await mongo.total_replies_all_users()
+        users = await mongo.count_users()
+        overall = safety.aggregate_snapshot()
+        await _say(
+            event,
+            "📊 **Across everybody**\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"Users: `{users}`\n"
+            f"Accounts connected: `{len(_user_clients)}`\n"
+            f"Replies (all time): `{total}`\n"
+            f"Replies last hour: `{overall['replies_last_hour']}`\n"
+            f"Replies last day: `{overall['replies_last_day']}`\n"
+            f"Strangers answered: `{overall['strangers_answered']}`",
+        )
+
+    @bot.on(events.NewMessage(pattern=r"^/ban\s+(\d+)$"))
+    @_admin_only
+    async def cmd_ban(event):
+        target = int(event.pattern_match.group(1))
+        await mongo.set_banned(target, True)
+        client = _user_clients.pop(target, None)
+        if client is not None:
+            with contextlib.suppress(Exception):
+                await client.disconnect()
+        await _say(event, f"🚫 `{target}` can no longer use the bot.")
+
+    @bot.on(events.NewMessage(pattern=r"^/unban\s+(\d+)$"))
+    @_admin_only
+    async def cmd_unban(event):
+        target = int(event.pattern_match.group(1))
+        await mongo.set_banned(target, False)
+        await _say(event, f"✅ `{target}` may use the bot again.")
+
+    @bot.on(events.NewMessage(pattern=r"^/broadcast\s+([\s\S]+)$"))
+    @_admin_only
+    async def cmd_broadcast(event):
+        body = event.pattern_match.group(1).strip()
+        users = await mongo.list_users()
+        sent = failed = 0
+        for row in users:
+            if row.get("banned"):
+                continue
+            try:
+                await bot.send_message(row["owner_id"], body, parse_mode="markdown")
+                sent += 1
+            except Exception:
+                failed += 1
+            await asyncio.sleep(0.05)  # stay under Telegram's broadcast limits
+        await _say(event, f"📣 Delivered to `{sent}`, failed `{failed}`.")
+
     @bot.on(events.NewMessage(pattern=r"^/help$"))
-    @_owner_only
+    @_registered
     async def cmd_help(event):
         await _say(
             event,
@@ -761,7 +927,16 @@ def register(bot: TelegramClient, start_user_client) -> None:
             "**Scheduled messages**\n"
             "`/schedule <id> morning|afternoon|night HH:MM`\n"
             "`/unschedule <id> <kind>` · `/schedules`\n\n"
-            "_Tip: forward a message to @userinfobot to find a user or group id._",
+            "**Privacy**\n"
+            "`/deleteme` — erase your session, settings and history\n\n"
+            "_Tip: forward a message to @userinfobot to find a user or group id._"
+            + (
+                "\n\n**Admin**\n"
+                "`/users` · `/gstats` · `/broadcast <text>`\n"
+                "`/ban <id>` · `/unban <id>`"
+                if settings.is_owner(event.sender_id)
+                else ""
+            ),
         )
 
 

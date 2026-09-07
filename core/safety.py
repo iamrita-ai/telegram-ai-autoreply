@@ -44,8 +44,10 @@ from config import settings
 __all__ = [
     "Decision",
     "RateLimiter",
-    "limiter",
+    "aggregate_snapshot",
+    "limiter_for",
     "normalise",
+    "reset_all",
     "screen_stranger_text",
 ]
 
@@ -375,4 +377,37 @@ class RateLimiter:
         self.__post_init__()
 
 
-limiter = RateLimiter()
+# ──────────────────────────────────────────────────────────────────────────
+#  One limiter per signed-in account
+# ──────────────────────────────────────────────────────────────────────────
+# The bot is multi-user, and Telegram rate-limits each *account* separately.
+# A shared limiter would mean one busy user throttling everybody else, and
+# two users talking to the same contact id would collide in the same bucket.
+_limiters: dict[int, RateLimiter] = {}
+
+
+def limiter_for(owner: int) -> RateLimiter:
+    """The rate limiter for one owner's account, created on first use."""
+    instance = _limiters.get(owner)
+    if instance is None:
+        instance = _limiters[owner] = RateLimiter()
+    return instance
+
+
+def forget_limiter(owner: int) -> None:
+    _limiters.pop(owner, None)
+
+
+def aggregate_snapshot() -> dict[str, object]:
+    """Totals across every account, for the health endpoint."""
+    snapshots = [limiter.snapshot() for limiter in _limiters.values()]
+    return {
+        "accounts": len(snapshots),
+        "replies_last_hour": sum(int(s["replies_last_hour"]) for s in snapshots),
+        "replies_last_day": sum(int(s["replies_last_day"]) for s in snapshots),
+        "strangers_answered": sum(int(s["strangers_answered"]) for s in snapshots),
+    }
+
+
+def reset_all() -> None:
+    _limiters.clear()

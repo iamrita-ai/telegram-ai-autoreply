@@ -34,29 +34,29 @@ log = logging.getLogger(__name__)
 __all__ = ["send_as_voice", "settings_summary", "should_speak"]
 
 
-async def _enabled() -> bool:
-    stored = await mongo.get_setting("voice_replies", None)
+async def _enabled(owner: int) -> bool:
+    stored = await mongo.get_user_setting(owner, "voice_replies", None)
     return settings.voice_replies if stored is None else bool(stored)
 
 
-async def _chance() -> float:
-    stored = await mongo.get_setting("voice_chance", None)
+async def _chance(owner: int) -> float:
+    stored = await mongo.get_user_setting(owner, "voice_chance", None)
     value = settings.voice_reply_chance if stored is None else float(stored)
     return min(max(value, 0.0), 1.0)
 
 
-async def _voice_name() -> str:
-    stored = await mongo.get_setting("voice_name", None)
+async def _voice_name(owner: int) -> str:
+    stored = await mongo.get_user_setting(owner, "voice_name", None)
     return str(stored or settings.voice_name)
 
 
-async def should_speak(text: str, *, is_stranger: bool = False) -> bool:
+async def should_speak(owner: int, text: str, *, is_stranger: bool = False) -> bool:
     """Should this particular reply be spoken rather than typed?"""
     if is_stranger:
         # Never send audio to somebody unknown: it is far more intrusive
         # than text, and it is the kind of thing that gets reported.
         return False
-    if not await _enabled():
+    if not await _enabled(owner):
         return False
     if not ai.tts_available():
         return False
@@ -65,12 +65,12 @@ async def should_speak(text: str, *, is_stranger: bool = False) -> bool:
         return False
     if "\n" in body or "```" in body:
         return False  # lists and code do not work as speech
-    return random.random() < await _chance()
+    return random.random() < await _chance(owner)
 
 
-async def send_as_voice(client, chat_id, text: str, *, reply_to=None) -> bool:
+async def send_as_voice(owner: int, client, chat_id, text: str, *, reply_to=None) -> bool:
     """Send ``text`` as speech. Returns ``False`` if the caller should send text."""
-    rendered = await ai.synthesize(text, voice=await _voice_name())
+    rendered = await ai.synthesize(text, voice=await _voice_name(owner))
     if not rendered:
         return False
     audio, extension = rendered
@@ -92,11 +92,11 @@ async def send_as_voice(client, chat_id, text: str, *, reply_to=None) -> bool:
     return True
 
 
-async def settings_summary() -> dict[str, object]:
+async def settings_summary(owner: int) -> dict[str, object]:
     return {
-        "enabled": await _enabled(),
-        "chance": await _chance(),
-        "voice": await _voice_name(),
+        "enabled": await _enabled(owner),
+        "chance": await _chance(owner),
+        "voice": await _voice_name(owner),
         "max_chars": settings.voice_max_chars,
         "available": ai.tts_available(),
     }

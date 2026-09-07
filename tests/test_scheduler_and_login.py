@@ -8,22 +8,23 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from core.safety import limiter
+from core.safety import reset_all
 from handlers import scheduler
 from handlers.control import _normalise_phone
 
 IST = ZoneInfo("Asia/Kolkata")
+OWNER = 111
 
 
 @pytest.fixture(autouse=True)
 def _clean_scheduler_state():
     scheduler._sent_today.clear()
     scheduler._recent.clear()
-    limiter.reset()
+    reset_all()
     yield
     scheduler._sent_today.clear()
     scheduler._recent.clear()
-    limiter.reset()
+    reset_all()
 
 
 def _unique_greetings():
@@ -46,8 +47,8 @@ def _unique_greetings():
     return AsyncMock(side_effect=lambda *a, **k: next(lines))
 
 
-def _schedule(user_id: int = 42, kind: str = "morning", when: str = "08:00"):
-    return [{"user_id": user_id, "type": kind, "time": when, "active": True}]
+def _schedule(target_id: int = 42, kind: str = "morning", when: str = "08:00"):
+    return [{"owner_id": OWNER, "target_id": target_id, "type": kind, "time": when, "active": True}]
 
 
 def _patched(schedules, client, locked=False):
@@ -67,7 +68,7 @@ async def test_a_due_message_is_sent() -> None:
 
     patches = _patched(_schedule(), client)
     with patches[0], patches[1], patches[2], patches[3], patches[4]:
-        sent = await scheduler._tick(client, now=now)
+        sent = await scheduler._tick(client, OWNER, now=now)
 
     assert sent == 1
     client.send_message.assert_awaited_once_with(42, "Morning, take 1!")
@@ -81,8 +82,8 @@ async def test_the_same_schedule_never_fires_twice_in_one_day() -> None:
 
     patches = _patched(_schedule(), client)
     with patches[0], patches[1], patches[2], patches[3], patches[4]:
-        first = await scheduler._tick(client, now=now)
-        second = await scheduler._tick(client, now=now + dt.timedelta(seconds=30))
+        first = await scheduler._tick(client, OWNER, now=now)
+        second = await scheduler._tick(client, OWNER, now=now + dt.timedelta(seconds=30))
 
     assert (first, second) == (1, 0)
     assert client.send_message.await_count == 1
@@ -93,8 +94,8 @@ async def test_the_same_schedule_fires_again_the_next_day() -> None:
     client.send_message = AsyncMock()
     patches = _patched(_schedule(), client)
     with patches[0], patches[1], patches[2], patches[3], patches[4]:
-        await scheduler._tick(client, now=dt.datetime(2026, 1, 1, 8, 0, tzinfo=IST))
-        await scheduler._tick(client, now=dt.datetime(2026, 1, 2, 8, 0, tzinfo=IST))
+        await scheduler._tick(client, OWNER, now=dt.datetime(2026, 1, 1, 8, 0, tzinfo=IST))
+        await scheduler._tick(client, OWNER, now=dt.datetime(2026, 1, 2, 8, 0, tzinfo=IST))
 
     assert client.send_message.await_count == 2
 
@@ -108,7 +109,7 @@ async def test_schedules_use_local_time_not_server_utc() -> None:
     with patches[0], patches[1], patches[2], patches[3], patches[4]:
         # 08:00 IST is 02:30 UTC. Matching must happen in IST.
         utc_equivalent = dt.datetime(2026, 1, 1, 2, 30, tzinfo=dt.UTC)
-        sent = await scheduler._tick(client, now=utc_equivalent.astimezone(IST))
+        sent = await scheduler._tick(client, OWNER, now=utc_equivalent.astimezone(IST))
 
     assert sent == 1
 
@@ -118,7 +119,7 @@ async def test_nothing_is_sent_while_paused() -> None:
     client.send_message = AsyncMock()
     patches = _patched(_schedule(), client, locked=True)
     with patches[0], patches[1], patches[2], patches[3], patches[4]:
-        sent = await scheduler._tick(client, now=dt.datetime(2026, 1, 1, 8, 0, tzinfo=IST))
+        sent = await scheduler._tick(client, OWNER, now=dt.datetime(2026, 1, 1, 8, 0, tzinfo=IST))
 
     assert sent == 0
     client.send_message.assert_not_awaited()
@@ -131,30 +132,30 @@ async def test_a_blocked_recipient_is_not_retried_every_30_seconds() -> None:
     patches = _patched(_schedule(), client)
     with patches[0], patches[1], patches[2], patches[3], patches[4]:
         now = dt.datetime(2026, 1, 1, 8, 0, tzinfo=IST)
-        await scheduler._tick(client, now=now)
-        await scheduler._tick(client, now=now + dt.timedelta(seconds=30))
+        await scheduler._tick(client, OWNER, now=now)
+        await scheduler._tick(client, OWNER, now=now + dt.timedelta(seconds=30))
 
     assert client.send_message.await_count == 1
 
 
 async def test_greeting_avoids_repeating_recent_messages() -> None:
-    scheduler._remember(42, "Morning!")
-    scheduler._remember(42, "Good morning ☀️")
-    assert scheduler._recent[42] == ["Morning!", "Good morning ☀️"]
+    scheduler._remember(OWNER, 42, "Morning!")
+    scheduler._remember(OWNER, 42, "Good morning ☀️")
+    assert scheduler._recent[(OWNER, 42)] == ["Morning!", "Good morning ☀️"]
 
     with (
         patch.object(scheduler.ai, "_complete", AsyncMock(return_value=(None, ""))),
         patch.object(scheduler.mongo, "get_persona_key", AsyncMock(return_value="casual")),
     ):
-        text = await scheduler._compose("morning", 42)
+        text = await scheduler._compose(OWNER, "morning", 42)
 
     assert text not in ("Morning!", "Good morning ☀️")
 
 
 def test_recent_greetings_do_not_grow_without_bound() -> None:
     for i in range(50):
-        scheduler._remember(1, f"message {i}")
-    assert len(scheduler._recent[1]) == 10
+        scheduler._remember(OWNER, 1, f"message {i}")
+    assert len(scheduler._recent[(OWNER, 1)]) == 10
 
 
 # ── login helpers ───────────────────────────────────────────────────────────

@@ -118,9 +118,24 @@ That's it — the account starts replying.
 
 ---
 
+## Who can use it
+
+The bot is **public**: anyone can open it, connect their own Telegram account
+and get their own auto-reply. Each person is completely separate — their own
+persona, custom prompt, quiet hours, blocked list, groups, schedules, voice
+settings, conversation history and rate limits. Nobody can see or change
+anybody else's.
+
+`OWNER_IDS` no longer gates access; those ids are the **operators**, and they
+additionally get `/users`, `/gstats`, `/broadcast`, `/ban` and `/unban`.
+
+Every user can erase themselves completely with `/deleteme`.
+
+---
+
 ## Commands
 
-All commands go to your **control bot**, and only your `OWNER_IDS` can use them.
+All commands go to the **control bot**, and act only on your own account.
 
 ### Account
 | Command | Description |
@@ -168,10 +183,23 @@ All commands go to your **control bot**, and only your `OWNER_IDS` can use them.
 | `/rich` | Send the formatted sample to yourself, from the control bot |
 | `/rich <id>` | Send the same sample **from your own account** to that chat |
 
+### Privacy
+| Command | Description |
+|---|---|
+| `/deleteme` | Erase your session, settings, schedules and history |
+
+### Admin _(only ids in `OWNER_IDS`)_
+| Command | Description |
+|---|---|
+| `/users` | Who is using the bot, and who is connected |
+| `/gstats` | Totals across everybody |
+| `/broadcast <text>` | Message every user |
+| `/ban <id>` · `/unban <id>` | Block someone from the bot |
+
 ### Memory & scheduling
 | Command | Description |
 |---|---|
-| `/forget <id>` · `/forgetall` | Clear conversation history |
+| `/forget <id>` · `/forgetall` | Clear your conversation history |
 | `/schedule <id> morning\|afternoon\|night HH:MM` | Daily greeting |
 | `/unschedule <id> <kind>` · `/schedules` | Manage them |
 
@@ -267,6 +295,10 @@ blocks (a screened stranger, a reply cap reached) ping you directly.
 
 The defaults are conservative on purpose. Every one is tunable in [`.env.example`](.env.example).
 
+**Every layer above is per account.** One user's traffic never counts against
+another's limits, and two users talking to the same contact are tracked
+separately.
+
 > **Note:** automating a user account is against Telegram's Terms of Service. This project is for replying to your own conversations; the safety rails reduce risk but cannot eliminate it. Do not use it to send unsolicited messages.
 
 ---
@@ -328,10 +360,10 @@ handlers/
 ├── control.py          the owner's command surface
 ├── ai.py               providers, failover, fragment buffering
 └── scheduler.py        daily greetings
-database/mongo.py       storage, encryption, retention
+database/mongo.py       storage, encryption, retention, per-user scoping
 assets/                 profile picture and /start banner
 scripts/                offline rich-message preview renderer
-tests/                  113 tests, no network required
+tests/                  185 tests, no network required
 ```
 
 ---
@@ -340,7 +372,7 @@ tests/                  113 tests, no network required
 
 ```bash
 pip install -r requirements.txt pytest pytest-asyncio ruff
-python -m pytest -q      # 113 tests, all offline
+python -m pytest -q      # 185 tests, all offline
 ruff check . && ruff format --check .
 ```
 

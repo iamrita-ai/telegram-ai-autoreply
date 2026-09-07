@@ -24,7 +24,7 @@ import logging
 
 from config import settings
 from core.personas import get_persona
-from core.safety import limiter, normalise
+from core.safety import limiter_for, normalise
 from database import mongo
 from handlers import ai
 
@@ -32,10 +32,10 @@ log = logging.getLogger(__name__)
 
 __all__ = ["run_scheduler"]
 
-#: (user_id, kind) -> date already handled, so a schedule fires once a day.
-_sent_today: dict[tuple[int, str], str] = {}
-#: Recent greetings per user, so no two mornings sound the same.
-_recent: dict[int, list[str]] = {}
+#: (owner, target, kind) -> date already handled, so it fires once a day.
+_sent_today: dict[tuple[int, int, str], str] = {}
+#: Recent greetings per (owner, target), so no two mornings sound the same.
+_recent: dict[tuple[int, int], list[str]] = {}
 
 #: How many times to ask the model for a *fresh* greeting before giving up.
 _COMPOSE_ATTEMPTS = 3
@@ -43,14 +43,14 @@ _COMPOSE_ATTEMPTS = 3
 _RETRY_DELAY = 20.0
 
 
-async def _compose(kind: str, user_id: int) -> str | None:
+async def _compose(owner: int, kind: str, target_id: int) -> str | None:
     """Ask the model for a greeting nobody has been sent before.
 
     Returns ``None`` when no provider produced anything usable. The caller
     skips the greeting in that case - there is deliberately no canned text.
     """
-    persona = get_persona(await mongo.get_persona_key())
-    avoid = _recent.get(user_id, [])[-8:]
+    persona = get_persona(await mongo.get_persona_key(owner))
+    avoid = _recent.get((owner, target_id), [])[-8:]
     seen = {normalise(a) for a in avoid}
 
     system = (
@@ -70,7 +70,8 @@ async def _compose(kind: str, user_id: int) -> str | None:
             [
                 {"role": "system", "content": system},
                 {"role": "user", "content": f"Send the {kind} greeting."},
-            ]
+            ],
+            owner,
         )
         if reply and normalise(reply) not in seen:
             log.debug("composed %s greeting via %s on attempt %d", kind, provider, attempt)
@@ -83,23 +84,23 @@ async def _compose(kind: str, user_id: int) -> str | None:
         "no provider produced a fresh %s greeting for %s - skipping it today "
         "rather than sending a canned line",
         kind,
-        user_id,
+        target_id,
     )
     return None
 
 
-def _remember(user_id: int, text: str) -> None:
-    history = _recent.setdefault(user_id, [])
+def _remember(owner: int, target_id: int, text: str) -> None:
+    history = _recent.setdefault((owner, target_id), [])
     history.append(text)
     del history[:-10]
 
 
-async def run_scheduler(client, *, interval: float = 30.0) -> None:
-    """Check every 30 s whether a scheduled message is due."""
-    log.info("scheduler started (timezone %s)", settings.timezone)
+async def run_scheduler(client, owner: int, *, interval: float = 30.0) -> None:
+    """Check every 30 s whether one owner's scheduled message is due."""
+    log.info("scheduler started for %s (timezone %s)", owner, settings.timezone_effective)
     while True:
         try:
-            await _tick(client)
+            await _tick(client, owner)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -107,42 +108,43 @@ async def run_scheduler(client, *, interval: float = 30.0) -> None:
         await asyncio.sleep(interval)
 
 
-async def _tick(client, *, now: dt.datetime | None = None) -> int:
+async def _tick(client, owner: int, *, now: dt.datetime | None = None) -> int:
     now = now or dt.datetime.now(settings.tz)
     current = now.strftime("%H:%M")
     today = now.strftime("%Y-%m-%d")
     sent = 0
 
-    if await mongo.is_locked():
+    if await mongo.is_locked(owner):
         return 0
 
-    for row in await mongo.get_active_schedules():
-        user_id, kind = row.get("user_id"), row.get("type")
+    limiter = limiter_for(owner)
+    for row in await mongo.get_active_schedules(owner):
+        target_id, kind = row.get("target_id"), row.get("type")
         if row.get("time") != current:
             continue
-        if _sent_today.get((user_id, kind)) == today:
+        if _sent_today.get((owner, target_id, kind)) == today:
             continue
 
-        _sent_today[(user_id, kind)] = today
+        _sent_today[(owner, target_id, kind)] = today
         try:
-            text = await _compose(kind, user_id)
+            text = await _compose(owner, kind, target_id)
             if not text:
                 continue
             # The same guard the reply path uses: never send a chat something
             # it has already had.
-            if not limiter.allow_text(user_id, text).allowed:
-                log.info("skipped a duplicate %s greeting for %s", kind, user_id)
+            if not limiter.allow_text(target_id, text).allowed:
+                log.info("skipped a duplicate %s greeting for %s", kind, target_id)
                 continue
-            await client.send_message(user_id, text)
-            limiter.record(user_id, text=text)
-            _remember(user_id, text)
-            await mongo.increment_stat("total_replies")
-            await mongo.increment_today()
+            await client.send_message(target_id, text)
+            limiter.record(target_id, text=text)
+            _remember(owner, target_id, text)
+            await mongo.increment_stat(owner, "total_replies")
+            await mongo.increment_today(owner)
             sent += 1
-            log.info("sent %s greeting to %s", kind, user_id)
+            log.info("sent %s greeting to %s", kind, target_id)
         except Exception as exc:
             # Leave it marked as sent: retrying every 30 s against a user who
             # has blocked the account is exactly the behaviour that gets an
             # account limited.
-            log.warning("could not send %s greeting to %s: %s", kind, user_id, exc)
+            log.warning("could not send %s greeting to %s: %s", kind, target_id, exc)
     return sent

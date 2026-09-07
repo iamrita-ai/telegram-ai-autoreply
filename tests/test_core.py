@@ -219,7 +219,7 @@ async def test_a_held_fragment_is_still_answered_eventually() -> None:
         patch.object(ai.mongo, "add_message", AsyncMock()),
         patch.object(ai, "_complete", AsyncMock(return_value=("hey you", "groq_70b"))),
     ):
-        result = await ai.flush_stale_fragment(1)
+        result = await ai.flush_stale_fragment(99, 1)
 
     assert result.text == "hey you"
 
@@ -236,7 +236,7 @@ async def test_a_fragment_followed_by_more_text_is_answered_once() -> None:
         patch.object(ai.mongo, "add_message", AsyncMock()),
         patch.object(ai, "_complete", AsyncMock(return_value=("sure", "groq_70b"))) as call,
     ):
-        result = await ai.generate_reply(1, "are you free tonight?")
+        result = await ai.generate_reply(99, 1, "are you free tonight?")
 
     assert result.text == "sure"
     cleared.assert_awaited_once()
