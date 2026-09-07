@@ -140,6 +140,14 @@ PROVIDERS: dict[str, Provider] = {
 TTS_MODEL = "canopylabs/orpheus-v1-english"
 TTS_URL = "https://api.groq.com/openai/v1/audio/speech"
 
+#: Orpheus English voice personas.
+TTS_VOICES = ("autumn", "diana", "hannah", "austin", "daniel", "troy")
+
+#: Telegram renders a voice note only for OGG/Opus. Groq documents "wav" as
+#: the supported format and accepts "ogg" on some accounts, so ask for ogg
+#: first and fall back - a wav still sends fine, just as an audio file.
+_TTS_FORMATS = ("ogg", "wav")
+
 #: provider key -> monotonic timestamp until which it is considered broken.
 _disabled_until: dict[str, float] = {}
 _AUTH_COOLDOWN = 900.0
@@ -331,6 +339,79 @@ def _tidy(reply: str) -> str:
     if len(lines) > 4:
         lines = lines[:4]
     return "\n".join(lines)[:900]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+#  Text to speech
+# ──────────────────────────────────────────────────────────────────────────
+async def synthesize(text: str, voice: str = "") -> tuple[bytes, str] | None:
+    """Render ``text`` as speech. Returns ``(audio_bytes, extension)``.
+
+    Returns ``None`` whenever speech is not possible - no key, text too long,
+    the model's terms not accepted, or the endpoint erroring. Every caller
+    must be able to fall back to sending the text.
+    """
+    if not settings.groq_api_key:
+        return None
+    body = (text or "").strip()
+    if not body or len(body) > settings.voice_max_chars:
+        # Groq's speech endpoint rejects input over 200 characters outright.
+        return None
+
+    now = time.monotonic()
+    if _disabled_until.get("tts", 0) > now:
+        return None
+
+    voice = voice or settings.voice_name
+    if voice not in TTS_VOICES:
+        log.warning("[tts] unknown voice %r - using %s", voice, TTS_VOICES[0])
+        voice = TTS_VOICES[0]
+
+    headers = {
+        "Authorization": f"Bearer {settings.groq_api_key}",
+        "Content-Type": "application/json",
+    }
+    for response_format in _TTS_FORMATS:
+        payload = {
+            "model": TTS_MODEL,
+            "input": body,
+            "voice": voice,
+            "response_format": response_format,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=settings.ai_timeout) as client:
+                response = await client.post(TTS_URL, headers=headers, json=payload)
+        except (httpx.TimeoutException, httpx.HTTPError) as exc:
+            log.warning("[tts] unreachable: %s", type(exc).__name__)
+            return None
+
+        if response.status_code == 200 and response.content:
+            return response.content, response_format
+        if response.status_code == 400:
+            # Usually "unsupported response_format"; try the next one.
+            log.debug("[tts] %s rejected: %s", response_format, response.text[:200])
+            continue
+        if response.status_code in (401, 403):
+            # Orpheus needs its terms accepted in the Groq console once.
+            _disabled_until["tts"] = now + _AUTH_COOLDOWN
+            log.error(
+                "[tts] rejected (HTTP %s) - accept the model terms at "
+                "console.groq.com/playground?model=canopylabs%%2Forpheus-v1-english. "
+                "Voice replies paused 15 min.",
+                response.status_code,
+            )
+            return None
+        if response.status_code == 429:
+            _disabled_until["tts"] = now + _RATE_COOLDOWN
+            log.warning("[tts] rate limited - paused 60s")
+            return None
+        log.warning("[tts] HTTP %s", response.status_code)
+        return None
+    return None
+
+
+def tts_available() -> bool:
+    return bool(settings.groq_api_key) and _disabled_until.get("tts", 0) <= time.monotonic()
 
 
 # ──────────────────────────────────────────────────────────────────────────

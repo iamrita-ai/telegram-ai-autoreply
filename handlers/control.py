@@ -27,6 +27,7 @@ from telethon.errors import (
 from telethon.sessions import StringSession
 
 from config import settings
+from core import voice
 from core.personas import persona_choices
 from core.rich import RichMessage, demo_message, send_rich
 from core.safety import limiter
@@ -637,6 +638,77 @@ def register(bot: TelegramClient, start_user_client) -> None:
             return
         await _say(event, f"✅ Sent the rich sample to `{chat_id}` from your account.")
 
+    # ── voice replies ─────────────────────────────────────────────────────
+    @bot.on(events.NewMessage(pattern=r"^/voice(?:\s+([\s\S]+))?$"))
+    @_owner_only
+    async def cmd_voice(event):
+        argument = (event.pattern_match.group(1) or "").strip().lower()
+        state = await voice.settings_summary()
+
+        if not argument:
+            await _say(
+                event,
+                "🎙 **Voice replies**\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                f"Status: {'🟢 on' if state['enabled'] else '🔴 off'}\n"
+                f"Chance: `{int(state['chance'] * 100)}%` of eligible replies\n"
+                f"Voice: `{state['voice']}`\n"
+                f"Max length: `{state['max_chars']}` characters\n"
+                f"Provider: {'ready' if state['available'] else 'unavailable'}\n\n"
+                "`/voice on` · `/voice off`\n"
+                "`/voice chance 25` — percentage of replies spoken\n"
+                f"`/voice name <{' | '.join(ai.TTS_VOICES)}>`\n"
+                "`/voice test <text>` — hear it right now\n\n"
+                "_Only short, single-line replies are spoken, and never to "
+                "strangers. Groq's Orpheus needs its model terms accepted "
+                "once in the Groq console._",
+            )
+            return
+
+        if argument in ("on", "off"):
+            await mongo.set_setting("voice_replies", argument == "on")
+            await _say(event, f"🎙 Voice replies are now **{argument}**.")
+            return
+
+        if argument.startswith("chance"):
+            try:
+                percent = int(argument.split()[1].rstrip("%"))
+            except (IndexError, ValueError):
+                await _say(event, "Use `/voice chance 25` — a percentage from 0 to 100.")
+                return
+            percent = max(0, min(100, percent))
+            await mongo.set_setting("voice_chance", percent / 100)
+            await _say(event, f"🎙 `{percent}%` of eligible replies will be spoken.")
+            return
+
+        if argument.startswith("name"):
+            parts = argument.split()
+            if len(parts) < 2 or parts[1] not in ai.TTS_VOICES:
+                await _say(event, "Pick one of: `" + "` · `".join(ai.TTS_VOICES) + "`")
+                return
+            await mongo.set_setting("voice_name", parts[1])
+            await _say(event, f"🎙 Voice set to `{parts[1]}`.")
+            return
+
+        if argument.startswith("test"):
+            body = (event.pattern_match.group(1) or "")[4:].strip()
+            body = body or "Hey, this is how I sound when I answer for you."
+            note = await event.respond("🎙 Generating…")
+            sent = await voice.send_as_voice(bot, event.chat_id, body)
+            await note.delete()
+            if not sent:
+                await _say(
+                    event,
+                    "❌ Could not generate speech.\n\n"
+                    "Check that `GROQ_API_KEY` is set, that the text is under "
+                    f"`{settings.voice_max_chars}` characters, and that you have "
+                    "accepted the Orpheus model terms once at "
+                    "console.groq.com/playground.",
+                )
+            return
+
+        await _say(event, "Unknown option. Send `/voice` to see what it takes.")
+
     # ── stranger guardian ─────────────────────────────────────────────────
     @bot.on(events.NewMessage(pattern=r"^/trust\s+(-?\d+)$"))
     @_owner_only
@@ -676,6 +748,8 @@ def register(bot: TelegramClient, start_user_client) -> None:
             "**People**\n"
             "`/block <id>` · `/unblock <id>` · `/blocked`\n"
             "`/trust <id>` — stop treating someone as a stranger\n\n"
+            "**Voice**\n"
+            "`/voice` — on/off, chance, voice name, test\n\n"
             "**Rich messages**\n"
             "`/rich` — see the formatted sample here\n"
             "`/rich <id>` — send it from your own account\n\n"

@@ -161,6 +161,19 @@ class Settings:
     #: loop that looks exactly like spam from the outside.
     echo_loop_threshold: int = field(default_factory=lambda: _env_int("ECHO_LOOP_THRESHOLD", 3))
 
+    # -- Voice replies (optional) -----------------------------------------
+    #: Occasionally answer with a Telegram voice note instead of text.
+    #: Off by default: it costs an extra API call, Groq's free TTS tier is
+    #: small, and a voice note from an account that never sent one before is
+    #: a behaviour change worth opting into deliberately.
+    voice_replies: bool = field(default_factory=lambda: _env_bool("VOICE_REPLIES", False))
+    #: Probability (0-1) that an eligible reply is sent as a voice note.
+    voice_reply_chance: float = field(default_factory=lambda: _env_float("VOICE_REPLY_CHANCE", 0.2))
+    #: Orpheus English voice: autumn, diana, hannah, austin, daniel or troy.
+    voice_name: str = field(default_factory=lambda: _env("VOICE_NAME", "hannah"))
+    #: Groq's speech endpoint rejects input longer than 200 characters.
+    voice_max_chars: int = field(default_factory=lambda: _env_int("VOICE_MAX_CHARS", 200))
+
     # -- Runtime ----------------------------------------------------------
     port: int = field(default_factory=lambda: _env_int("PORT", 8080))
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO").upper())

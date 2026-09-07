@@ -18,6 +18,7 @@ from telethon.errors import FloodWaitError
 from telethon.tl.types import User
 
 from config import settings
+from core import voice
 from core.humanize import detect_sentiment, is_quiet_hours, send_reaction, simulate_typing
 from core.safety import limiter
 from database import mongo
@@ -188,7 +189,11 @@ async def _handle(client, event, *, me_id: int, display_name: str) -> None:
             source_text=text,
             extra_delay=decision.extra_delay,
         )
-        await event.reply(reply)
+        spoken = False
+        if await voice.should_speak(reply, is_stranger=stranger):
+            spoken = await voice.send_as_voice(client, event.chat_id, reply, reply_to=event.id)
+        if not spoken:
+            await event.reply(reply)
 
         limiter.record(event.chat_id, text=reply, is_stranger=stranger)
         await mongo.increment_stat("total_replies")

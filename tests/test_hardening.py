@@ -405,3 +405,106 @@ async def test_composer_tells_the_model_what_it_already_sent(monkeypatch) -> Non
     system_prompt = complete.call_args.args[0][0]["content"]
     assert "Rise and shine!" in system_prompt
     scheduler._recent.clear()
+
+
+# ── voice replies ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_voice_is_off_by_default(monkeypatch) -> None:
+    from core import voice
+
+    with patch.object(voice.mongo, "get_setting", AsyncMock(return_value=None)):
+        monkeypatch.setattr(voice.settings, "voice_replies", False)
+        assert await voice.should_speak("Sure, see you at 8.") is False
+
+
+@pytest.mark.asyncio
+async def test_voice_never_goes_to_a_stranger(monkeypatch) -> None:
+    """Audio to someone unknown is intrusive and gets reported."""
+    from core import voice
+
+    with patch.object(voice.mongo, "get_setting", AsyncMock(return_value=True)):
+        monkeypatch.setattr(voice.settings, "voice_replies", True)
+        assert await voice.should_speak("Hi there", is_stranger=True) is False
+
+
+@pytest.mark.asyncio
+async def test_long_replies_are_never_spoken(monkeypatch) -> None:
+    """Groq's speech endpoint rejects input over 200 characters."""
+    from core import voice
+
+    async def enabled(key, default=None):
+        return {"voice_replies": True, "voice_chance": 1.0}.get(key, default)
+
+    with (
+        patch.object(voice.mongo, "get_setting", AsyncMock(side_effect=enabled)),
+        patch.object(voice.ai, "tts_available", lambda: True),
+    ):
+        assert await voice.should_speak("x" * 201) is False
+        assert await voice.should_speak("Short and sweet.") is True
+
+
+@pytest.mark.asyncio
+async def test_multiline_replies_are_not_spoken(monkeypatch) -> None:
+    from core import voice
+
+    async def enabled(key, default=None):
+        return {"voice_replies": True, "voice_chance": 1.0}.get(key, default)
+
+    with (
+        patch.object(voice.mongo, "get_setting", AsyncMock(side_effect=enabled)),
+        patch.object(voice.ai, "tts_available", lambda: True),
+    ):
+        assert await voice.should_speak("line one\nline two") is False
+
+
+@pytest.mark.asyncio
+async def test_failed_synthesis_falls_back_to_text() -> None:
+    """A broken TTS setup must never cost a reply."""
+    from core import voice
+
+    with (
+        patch.object(voice.ai, "synthesize", AsyncMock(return_value=None)),
+        patch.object(voice.mongo, "get_setting", AsyncMock(return_value=None)),
+    ):
+        assert await voice.send_as_voice(AsyncMock(), 1, "hello") is False
+
+
+@pytest.mark.asyncio
+async def test_ogg_is_sent_as_a_real_voice_note() -> None:
+    from core import voice
+
+    client = AsyncMock()
+    with (
+        patch.object(voice.ai, "synthesize", AsyncMock(return_value=(b"OggS...", "ogg"))),
+        patch.object(voice.mongo, "get_setting", AsyncMock(return_value=None)),
+    ):
+        assert await voice.send_as_voice(client, 1, "hello") is True
+    assert client.send_file.call_args.kwargs["voice_note"] is True
+
+
+@pytest.mark.asyncio
+async def test_wav_is_sent_as_an_audio_file_not_a_voice_note() -> None:
+    """Telegram only renders OGG/Opus as a voice note."""
+    from core import voice
+
+    client = AsyncMock()
+    with (
+        patch.object(voice.ai, "synthesize", AsyncMock(return_value=(b"RIFF...", "wav"))),
+        patch.object(voice.mongo, "get_setting", AsyncMock(return_value=None)),
+    ):
+        assert await voice.send_as_voice(client, 1, "hello") is True
+    assert client.send_file.call_args.kwargs["voice_note"] is False
+
+
+@pytest.mark.asyncio
+async def test_synthesis_is_skipped_over_the_character_limit(monkeypatch) -> None:
+    monkeypatch.setattr(ai.settings, "groq_api_key", "key")
+    assert await ai.synthesize("x" * 500) is None
+
+
+def test_configured_voice_is_a_real_orpheus_voice() -> None:
+    from config import Settings
+
+    assert Settings().voice_name in ai.TTS_VOICES

@@ -153,6 +153,15 @@ All commands go to your **control bot**, and only your `OWNER_IDS` can use them.
 | `/trust <id>` | Stop treating someone as a stranger (lifts the reply cap) |
 | `/allowgroup <id>` · `/disallowgroup <id>` · `/groups` | Group allow-list |
 
+### Voice
+| Command | Description |
+|---|---|
+| `/voice` | Show the current voice settings |
+| `/voice on` · `/voice off` | Turn spoken replies on and off |
+| `/voice chance 25` | Percentage of eligible replies that get spoken |
+| `/voice name troy` | Pick the Orpheus voice |
+| `/voice test <text>` | Hear it immediately |
+
 ### Rich messages
 | Command | Description |
 |---|---|
@@ -193,6 +202,30 @@ Two details worth knowing if you extend it:
 - Entity offsets are counted in **UTF-16 code units, not Python characters**.
   One emoji outside the basic plane shifts every entity after it by one. The
   builder counts correctly, so emoji are safe anywhere in the text.
+
+---
+
+## Voice replies
+
+Off by default. When enabled, a share of short replies are sent as a Telegram
+voice note spoken by Groq's `canopylabs/orpheus-v1-english`.
+
+Worth knowing before you turn it on:
+
+- Orpheus is a **text-to-speech** model, not a chat model — it is deliberately
+  kept out of the reply fallback chain, where it would fail on every call.
+- Groq's speech endpoint rejects input over **200 characters**, so only short,
+  single-line replies are eligible. Everything else stays text.
+- Telegram renders a true voice note only for OGG/Opus. If the endpoint returns
+  WAV, the clip is sent as an audio file instead.
+- Voice notes are **never** sent to strangers — audio is far more intrusive
+  than text and is exactly what gets reported.
+- You must accept the model terms once at
+  [console.groq.com/playground](https://console.groq.com/playground?model=canopylabs%2Forpheus-v1-english),
+  or the endpoint returns 401 and the bot quietly stays on text.
+
+Any failure — no key, terms not accepted, rate limit, oversized text — falls
+back to sending the reply as text, so voice can never cost you a message.
 
 ---
 
@@ -286,6 +319,7 @@ config.py               typed settings, validated at boot
 core/
 ├── personas.py         the three personalities + shared house rules
 ├── safety.py           rate limits, stranger guardian, duplicate guard
+├── voice.py            optional voice-note replies (Orpheus TTS)
 ├── rich.py             formatted-message builder (UTF-16 safe entities)
 ├── humanize.py         typing rhythm, reactions, quiet hours
 └── logging_setup.py    structured logging
@@ -297,7 +331,7 @@ handlers/
 database/mongo.py       storage, encryption, retention
 assets/                 profile picture and /start banner
 scripts/                offline rich-message preview renderer
-tests/                  95 tests, no network required
+tests/                  104 tests, no network required
 ```
 
 ---
@@ -306,7 +340,7 @@ tests/                  95 tests, no network required
 
 ```bash
 pip install -r requirements.txt pytest pytest-asyncio ruff
-python -m pytest -q      # 95 tests, all offline
+python -m pytest -q      # 104 tests, all offline
 ruff check . && ruff format --check .
 ```
 
