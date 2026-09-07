@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from core.safety import limiter
 from handlers import scheduler
 from handlers.control import _normalise_phone
 
@@ -18,9 +19,31 @@ IST = ZoneInfo("Asia/Kolkata")
 def _clean_scheduler_state():
     scheduler._sent_today.clear()
     scheduler._recent.clear()
+    limiter.reset()
     yield
     scheduler._sent_today.clear()
     scheduler._recent.clear()
+    limiter.reset()
+
+
+def _unique_greetings():
+    """The composer never returns the same text twice, so nor should the mock.
+
+    The scheduler now refuses to send a greeting that duplicates a recent one,
+    which is the point of the duplicate guard - a fixed string every morning
+    is what makes an account look automated.
+    """
+    lines = iter(
+        [
+            "Morning, take 1!",
+            "Hope the day is kind to you.",
+            "Up early? Coffee is mandatory.",
+            "Sun is out, so am I.",
+            "Another one - let us make it count.",
+        ]
+        * 10
+    )
+    return AsyncMock(side_effect=lambda *a, **k: next(lines))
 
 
 def _schedule(user_id: int = 42, kind: str = "morning", when: str = "08:00"):
@@ -33,7 +56,7 @@ def _patched(schedules, client, locked=False):
         patch.object(scheduler.mongo, "is_locked", AsyncMock(return_value=locked)),
         patch.object(scheduler.mongo, "increment_stat", AsyncMock()),
         patch.object(scheduler.mongo, "increment_today", AsyncMock()),
-        patch.object(scheduler, "_compose", AsyncMock(return_value="Morning!")),
+        patch.object(scheduler, "_compose", _unique_greetings()),
     )
 
 
@@ -47,7 +70,7 @@ async def test_a_due_message_is_sent() -> None:
         sent = await scheduler._tick(client, now=now)
 
     assert sent == 1
-    client.send_message.assert_awaited_once_with(42, "Morning!")
+    client.send_message.assert_awaited_once_with(42, "Morning, take 1!")
 
 
 async def test_the_same_schedule_never_fires_twice_in_one_day() -> None:

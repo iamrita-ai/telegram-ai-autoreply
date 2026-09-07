@@ -8,9 +8,13 @@ readable list of problems instead of crashing later on a missing key.
 
 from __future__ import annotations
 
+import datetime as dt
+import logging
 import os
 from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+log = logging.getLogger(__name__)
 
 __all__ = ["ConfigError", "Settings", "settings"]
 
@@ -118,17 +122,76 @@ class Settings:
         default_factory=lambda: _env_bool("DROP_WHILE_REPLYING", True)
     )
 
+    # -- Anti-ban: pacing -------------------------------------------------
+    #: Minimum seconds between *any* two outgoing messages, account-wide.
+    #: Telegram's spam heuristics look at the account, not the chat, so a
+    #: burst spread over ten different chats is still a burst.
+    global_min_gap: float = field(default_factory=lambda: _env_float("GLOBAL_MIN_GAP", 8.0))
+    #: Each reply sent in the last 10 minutes adds this many seconds of
+    #: delay, so a busy period automatically slows the account down.
+    burst_delay_step: float = field(default_factory=lambda: _env_float("BURST_DELAY_STEP", 2.5))
+    #: Ceiling for the burst penalty, so it can never stall a chat forever.
+    burst_delay_max: float = field(default_factory=lambda: _env_float("BURST_DELAY_MAX", 45.0))
+    #: Multiplier applied to every delay during quiet hours - answering at
+    #: 3am at normal speed is one of the clearest automation tells.
+    night_delay_factor: float = field(default_factory=lambda: _env_float("NIGHT_DELAY_FACTOR", 2.5))
+
+    # -- Anti-ban: stranger guardian --------------------------------------
+    #: Extra seconds before answering somebody with no conversation history.
+    stranger_extra_delay: float = field(
+        default_factory=lambda: _env_float("STRANGER_EXTRA_DELAY", 25.0)
+    )
+    #: How many messages the bot will send to a stranger before it stops and
+    #: waits for the owner to step in. Strangers are the highest-risk
+    #: reports: a scammer only needs to press "report spam" once.
+    stranger_max_replies: int = field(default_factory=lambda: _env_int("STRANGER_MAX_REPLIES", 3))
+    #: Screen stranger messages for scam/phishing/abuse patterns and refuse
+    #: to auto-reply to them, notifying the owner instead.
+    stranger_screening: bool = field(default_factory=lambda: _env_bool("STRANGER_SCREENING", True))
+
+    # -- Anti-ban: repetition ---------------------------------------------
+    #: Never send the same (or near-same) text to a chat twice within this
+    #: many seconds. Repeated identical messages are the single most
+    #: reliable way to get an account flagged as a spam bot.
+    duplicate_window: float = field(default_factory=lambda: _env_float("DUPLICATE_WINDOW", 1800.0))
+    #: How many recent outgoing messages per chat to remember for that check.
+    duplicate_memory: int = field(default_factory=lambda: _env_int("DUPLICATE_MEMORY", 12))
+    #: Stop answering if the *incoming* text keeps repeating - that is either
+    #: a stuck client or another bot, and replying forever is a ping-pong
+    #: loop that looks exactly like spam from the outside.
+    echo_loop_threshold: int = field(default_factory=lambda: _env_int("ECHO_LOOP_THRESHOLD", 3))
+
     # -- Runtime ----------------------------------------------------------
     port: int = field(default_factory=lambda: _env_int("PORT", 8080))
     log_level: str = field(default_factory=lambda: _env("LOG_LEVEL", "INFO").upper())
 
     # -- Derived ----------------------------------------------------------
     @property
-    def tz(self) -> ZoneInfo:
+    def tz(self) -> dt.tzinfo:
+        """The configured timezone, or UTC if it cannot be resolved.
+
+        The fallback is ``datetime.timezone.utc`` rather than
+        ``ZoneInfo("UTC")`` on purpose: on an image with no timezone database
+        the fallback itself raised, which turned a wrong-clock bug into a
+        crash. This property must never raise.
+        """
         try:
             return ZoneInfo(self.timezone)
-        except (ZoneInfoNotFoundError, ValueError):
-            return ZoneInfo("UTC")
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            return dt.UTC
+
+    @property
+    def timezone_ok(self) -> bool:
+        """Did the requested timezone actually resolve?"""
+        try:
+            ZoneInfo(self.timezone)
+        except Exception:
+            return False
+        return True
+
+    @property
+    def timezone_effective(self) -> str:
+        return self.timezone if self.timezone_ok else "UTC (fallback)"
 
     @property
     def ai_configured(self) -> bool:
@@ -161,6 +224,16 @@ class Settings:
             problems.append(
                 "No AI provider key set - add GROQ_API_KEY, SAMBANOVA_API_KEY or NVIDIA_API_KEY"
             )
+        # A wrong clock is not fatal, but it must never be silent: this is the
+        # bug that made every scheduled message fire 5h30m late on Render.
+        if not self.timezone_ok:
+            log.warning(
+                "TIMEZONE=%r could not be resolved - falling back to UTC. "
+                "Scheduled messages will fire on UTC, not your local clock. "
+                "Check the spelling (e.g. Asia/Kolkata) and make sure the "
+                "'tzdata' package is installed in the image.",
+                self.timezone,
+            )
         if problems:
             raise ConfigError(
                 "Configuration is incomplete:\n" + "\n".join(f"  - {p}" for p in problems)
@@ -171,7 +244,7 @@ class Settings:
         return {
             "owners": len(self.owner_ids),
             "persona": self.default_persona,
-            "timezone": self.timezone,
+            "timezone": self.timezone_effective,
             "providers": [
                 name
                 for name, key in (

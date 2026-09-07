@@ -41,6 +41,8 @@ class Provider:
     label: str
     url: str
     model: str
+    #: Lower is better. Providers are tried in ascending rank order.
+    rank: int = 99
 
     @property
     def api_key(self) -> str:
@@ -59,40 +61,122 @@ class Provider:
         return bool(self.api_key)
 
 
+#: Chat providers in quality order: best first, cheaper/weaker as fallback.
+#: ``rank`` makes the intended order explicit and survives dict edits.
+#:
+#: Groq retired the Llama chat models (llama-3.3-70b-versatile and
+#: llama-3.1-8b-instant on 2026-08-16, qwen/qwen3-32b on 2026-07-17,
+#: llama-4-maverick on 2026-03-09), so the old Groq entries here were dead
+#: model IDs that returned 404 on every single message.
 PROVIDERS: dict[str, Provider] = {
     p.key: p
     for p in (
-        Provider("groq_70b", "⚡ Groq · Llama 3.3 70B", GROQ_URL, "llama-3.3-70b-versatile"),
-        Provider("groq_8b", "⚡ Groq · Llama 3.1 8B (fast)", GROQ_URL, "llama-3.1-8b-instant"),
+        # -- tier 1: best quality -----------------------------------------
+        Provider(
+            "groq_gpt_oss_120b",
+            "⚡ Groq · GPT-OSS 120B",
+            GROQ_URL,
+            "openai/gpt-oss-120b",
+            rank=1,
+        ),
+        Provider(
+            "groq_qwen3_27b",
+            "⚡ Groq · Qwen 3.8 27B",
+            GROQ_URL,
+            "qwen/qwen3.8-27b",
+            rank=2,
+        ),
+        Provider(
+            "groq_compound",
+            "⚡ Groq · Compound",
+            GROQ_URL,
+            "groq/compound",
+            rank=3,
+        ),
+        # -- tier 2: fast and cheap ---------------------------------------
+        Provider(
+            "groq_gpt_oss_20b",
+            "⚡ Groq · GPT-OSS 20B (fast)",
+            GROQ_URL,
+            "openai/gpt-oss-20b",
+            rank=4,
+        ),
+        Provider(
+            "groq_compound_mini",
+            "⚡ Groq · Compound Mini (fast)",
+            GROQ_URL,
+            "groq/compound-mini",
+            rank=5,
+        ),
+        # -- tier 3: other vendors, used when Groq is down or rate limited -
         Provider(
             "sambanova_70b",
             "🚀 SambaNova · Llama 3.3 70B",
             SAMBANOVA_URL,
             "Meta-Llama-3.3-70B-Instruct",
+            rank=6,
         ),
         Provider(
             "nvidia_70b",
             "🟢 NVIDIA NIM · Llama 3.3 70B",
             NVIDIA_URL,
             "meta/llama-3.3-70b-instruct",
+            rank=7,
         ),
         Provider(
             "nvidia_maverick",
             "🟢 NVIDIA NIM · Llama 4 Maverick",
             NVIDIA_URL,
             "meta/llama-4-maverick-17b-128e-instruct",
+            rank=8,
         ),
     )
 }
+
+#: Groq also serves ``canopylabs/orpheus-v1-english``, but it is a
+#: **text-to-speech** model, not a chat-completion model. Putting it in the
+#: chain above would make every reply that reached it fail, so it lives here
+#: instead and is only used by the optional voice-note feature.
+TTS_MODEL = "canopylabs/orpheus-v1-english"
+TTS_URL = "https://api.groq.com/openai/v1/audio/speech"
 
 #: provider key -> monotonic timestamp until which it is considered broken.
 _disabled_until: dict[str, float] = {}
 _AUTH_COOLDOWN = 900.0
 _RATE_COOLDOWN = 60.0
+_RETIRED_COOLDOWN = 21600.0  # 6h - a dead model ID will not come back today
+
+
+def _looks_retired(response: httpx.Response) -> bool:
+    """Does this 400/404 mean 'no such model' rather than a bad request?"""
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    error = body.get("error") or {}
+    haystack = " ".join(
+        str(x) for x in (error.get("code"), error.get("message"), error.get("type"))
+    ).lower()
+    if not haystack.strip():
+        haystack = response.text[:400].lower()
+    return any(
+        marker in haystack
+        for marker in (
+            "model_not_found",
+            "model_decommissioned",
+            "does not exist",
+            "not exist",
+            "decommissioned",
+            "unknown model",
+            "invalid model",
+            "no such model",
+        )
+    )
 
 
 def available_providers() -> list[Provider]:
-    return [p for p in PROVIDERS.values() if p.available]
+    """Usable providers, best quality first."""
+    return sorted((p for p in PROVIDERS.values() if p.available), key=lambda p: p.rank)
 
 
 def provider_health() -> dict[str, str]:
@@ -204,6 +288,17 @@ async def _call(provider: Provider, messages: list[dict[str, str]]) -> str | Non
     elif response.status_code == 429:
         _disabled_until[provider.key] = now + _RATE_COOLDOWN
         log.warning("[ai] %s rate limited - paused 60s", provider.key)
+    elif response.status_code in (400, 404) and _looks_retired(response):
+        # A decommissioned or misspelled model ID fails identically forever.
+        # Without this the bot paid a full round trip to a dead model on
+        # every message it answered.
+        _disabled_until[provider.key] = now + _RETIRED_COOLDOWN
+        log.error(
+            "[ai] %s: model %r is not available on this account - "
+            "paused 6h. Check the provider's model list.",
+            provider.key,
+            provider.model,
+        )
     else:
         log.warning("[ai] %s returned HTTP %s", provider.key, response.status_code)
     return None

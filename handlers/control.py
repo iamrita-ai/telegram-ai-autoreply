@@ -12,8 +12,10 @@ Security notes, both of them real problems in the previous version:
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 import re
+from pathlib import Path
 
 from telethon import Button, TelegramClient, events
 from telethon.errors import (
@@ -26,6 +28,7 @@ from telethon.sessions import StringSession
 
 from config import settings
 from core.personas import persona_choices
+from core.rich import RichMessage, demo_message, send_rich
 from core.safety import limiter
 from database import mongo
 from handlers import ai
@@ -33,6 +36,9 @@ from handlers import ai
 log = logging.getLogger(__name__)
 
 __all__ = ["register", "set_user_client"]
+
+#: Welcome banner shown by /start.
+START_IMAGE = Path(__file__).resolve().parent.parent / "assets" / "start.jpg"
 
 #: Live clients mid-login, keyed by owner id. Kept connected between steps so
 #: the OTP is signed in on the same connection that requested it - otherwise
@@ -99,18 +105,30 @@ def register(bot: TelegramClient, start_user_client) -> None:
     @_owner_only
     async def cmd_start(event):
         sessions = await mongo.load_all_sessions()
+        signed_in = bool(sessions)
         state = (
             f"🟢 {len(sessions)} account(s) signed in"
-            if sessions
+            if signed_in
             else "🔴 No account signed in — send /login"
         )
-        await _say(
-            event,
-            "🤖 **Auto-Reply Control Panel**\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            f"{state}\n\n"
-            "Send /help for the full command list.",
+        message = (
+            RichMessage()
+            .bold("Serena · Auto-Reply Control Panel")
+            .newline(2)
+            .text_(state)
+            .newline(2)
+            .quote(
+                "I answer your Telegram messages in your own voice while you "
+                "are away, and I pace myself so the account stays safe.",
+            )
+            .newline(2)
+            .text_("Next: ")
+            .code("/login" if not signed_in else "/status")
+            .text_("   ·   full list: ")
+            .code("/help")
         )
+        banner = START_IMAGE if START_IMAGE.exists() else None
+        await send_rich(bot, event.chat_id, message, file=banner)
 
     @bot.on(events.NewMessage(pattern=r"^/status$"))
     @_owner_only
@@ -135,6 +153,8 @@ def register(bot: TelegramClient, start_user_client) -> None:
             f"🎭 Persona: `{persona_key}`{' (custom prompt)' if custom else ''}\n"
             f"🤖 Model: {label}\n"
             f"😴 Quiet hours: `{dnd or 'off'}`\n"
+            f"🕒 Timezone: `{settings.timezone_effective}` "
+            f"(now {dt.datetime.now(settings.tz).strftime('%H:%M')})\n"
             f"💬 Replies today: `{today}` · total `{total}`\n"
             f"📉 Last hour: `{stats['replies_last_hour']}`/"
             f"`{stats['limits']['global_hourly']}`\n"
@@ -154,8 +174,21 @@ def register(bot: TelegramClient, start_user_client) -> None:
             f"Replies today: `{s['replies_last_day']}` / `{limits['global_daily']}`\n"
             f"Chats active this hour: `{s['active_chats_this_hour']}`\n\n"
             f"Per chat: max `{limits['per_chat_hourly']}`/hour, "
-            f"`{limits['per_chat_cooldown_s']}`s between replies\n\n"
-            "_These protect the account from being flagged for automation. "
+            f"`{limits['per_chat_cooldown_s']}`s between replies\n"
+            f"Account-wide gap: `{limits['global_min_gap_s']}`s minimum\n"
+            f"Current burst penalty: `+{s['current_burst_penalty_s']}`s\n\n"
+            "🛡 **Stranger guardian**\n"
+            f"Unknown senders answered: `{s['strangers_answered']}`\n"
+            f"Max replies per stranger: `{limits['stranger_max_replies']}`\n"
+            f"Screening: `{'on' if settings.stranger_screening else 'off'}`\n\n"
+            + (
+                "**Recently blocked**\n"
+                + "\n".join(f"· {r}" for r in s["recently_blocked"])
+                + "\n\n"
+                if s["recently_blocked"]
+                else ""
+            )
+            + "_These protect the account from being flagged for automation. "
             "Change them with the env vars in `.env.example`._",
         )
 
@@ -569,6 +602,53 @@ def register(bot: TelegramClient, start_user_client) -> None:
         await _say(event, f"📅 **Scheduled messages ({len(rows)})**\n{body}")
 
     # ── help ──────────────────────────────────────────────────────────────
+    # ── rich messages ─────────────────────────────────────────────────────
+    @bot.on(events.NewMessage(pattern=r"^/rich(?:\s+(-?\d+))?$"))
+    @_owner_only
+    async def cmd_rich(event):
+        """Show the rich-message sample, here or in a real chat."""
+        target = event.pattern_match.group(1)
+        if not target:
+            await send_rich(bot, event.chat_id, demo_message())
+            await _say(
+                event,
+                "☝️ That is the control bot sending it.\n\n"
+                "To see it arrive from **your own account** — the way your "
+                "contacts will see it — send `/rich <user id>`. "
+                "Try your own id first: `/rich " + str(event.sender_id) + "`",
+            )
+            return
+
+        chat_id = int(target)
+        clients = get_user_clients()
+        if not clients:
+            await _say(event, "🔴 No account is signed in. Send /login first.")
+            return
+        user_client = next(iter(clients.values()))
+        try:
+            await send_rich(user_client, chat_id, demo_message())
+        except Exception as exc:
+            await _say(
+                event,
+                f"❌ Could not send to `{chat_id}`: `{type(exc).__name__}`\n\n"
+                "The account needs to be able to message that id — try your "
+                "own id, or someone you have talked to before.",
+            )
+            return
+        await _say(event, f"✅ Sent the rich sample to `{chat_id}` from your account.")
+
+    # ── stranger guardian ─────────────────────────────────────────────────
+    @bot.on(events.NewMessage(pattern=r"^/trust\s+(-?\d+)$"))
+    @_owner_only
+    async def cmd_trust(event):
+        chat_id = int(event.pattern_match.group(1))
+        limiter.trust(chat_id)
+        await _say(
+            event,
+            f"✅ `{chat_id}` is no longer treated as a stranger — "
+            "the reply cap and the extra delay are lifted for it.",
+        )
+
     @bot.on(events.NewMessage(pattern=r"^/help$"))
     @_owner_only
     async def cmd_help(event):
@@ -594,7 +674,11 @@ def register(bot: TelegramClient, start_user_client) -> None:
             "`/quiet 23:00-07:00` — no replies in that window\n"
             "`/quietoff` — always available\n\n"
             "**People**\n"
-            "`/block <id>` · `/unblock <id>` · `/blocked`\n\n"
+            "`/block <id>` · `/unblock <id>` · `/blocked`\n"
+            "`/trust <id>` — stop treating someone as a stranger\n\n"
+            "**Rich messages**\n"
+            "`/rich` — see the formatted sample here\n"
+            "`/rich <id>` — send it from your own account\n\n"
             "**Groups** _(replies need a mention as well)_\n"
             "`/allowgroup <id>` · `/disallowgroup <id>` · `/groups`\n\n"
             "**Memory**\n"

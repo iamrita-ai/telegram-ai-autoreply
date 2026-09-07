@@ -141,13 +141,15 @@ def test_counters_expire_after_an_hour() -> None:
 
 def test_a_brand_new_chat_gets_an_extra_pause() -> None:
     """An instant reply to a stranger is the clearest automation tell."""
-    limiter = RateLimiter(new_chat_extra_delay=3.0)
+    limiter = RateLimiter(new_chat_extra_delay=60.0)
     first = limiter.check(42, now=100.0)
-    assert first.allowed and first.extra_delay > 0
+    assert first.allowed and first.extra_delay > 30
 
+    # A chat we have spoken to before is answered sooner - though never
+    # instantly, because burst damping and the account-wide gap still apply.
     limiter.record(42, now=100.0)
     later = limiter.check(42, now=500.0)
-    assert later.allowed and later.extra_delay == 0
+    assert later.allowed and later.extra_delay < 30
 
 
 def test_a_chat_being_replied_to_is_not_answered_twice() -> None:

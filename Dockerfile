@@ -8,13 +8,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PORT=8080
+    PORT=8080 \
+    TZ=UTC
 
 WORKDIR /app
 
-# curl is only needed by the container HEALTHCHECK below.
+# curl  - used by the container HEALTHCHECK below.
+# tzdata - python:*-slim ships no IANA timezone database, so zoneinfo could not
+#          resolve Asia/Kolkata and every schedule silently ran on UTC. The
+#          tzdata *wheel* in requirements.txt also covers this; both are kept so
+#          the timezone works whether or not the wheel install is skipped.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends curl \
+ && apt-get install -y --no-install-recommends curl tzdata \
  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

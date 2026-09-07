@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import datetime as dt
 import json
 import logging
 import signal
@@ -39,10 +40,24 @@ def _spawn(coro, name: str) -> asyncio.Task:
 #  Health endpoint
 # ──────────────────────────────────────────────────────────────────────────
 def _health_payload() -> dict[str, Any]:
+    warnings: list[str] = []
+    if not settings.timezone_ok:
+        # Surfaced here because it is otherwise invisible: the bot keeps
+        # working, it just runs every schedule on the wrong clock.
+        warnings.append(
+            f"TIMEZONE={settings.timezone!r} did not resolve; schedules are running on UTC"
+        )
     return {
         "status": "ok" if _clients else "degraded",
         "uptime_s": round(time.time() - _STARTED_AT, 1),
         "accounts_running": len(_clients),
+        "timezone": {
+            "configured": settings.timezone,
+            "effective": settings.timezone_effective,
+            "resolved": settings.timezone_ok,
+            "local_time": dt.datetime.now(settings.tz).isoformat(timespec="seconds"),
+        },
+        "warnings": warnings,
         "config": settings.describe(),
         "safety": limiter.snapshot(),
     }

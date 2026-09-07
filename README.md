@@ -150,7 +150,14 @@ All commands go to your **control bot**, and only your `OWNER_IDS` can use them.
 |---|---|
 | `/quiet 23:00-07:00` · `/quietoff` | Silent hours, in your timezone |
 | `/block <id>` · `/unblock <id>` · `/blocked` | Never reply to someone |
+| `/trust <id>` | Stop treating someone as a stranger (lifts the reply cap) |
 | `/allowgroup <id>` · `/disallowgroup <id>` · `/groups` | Group allow-list |
+
+### Rich messages
+| Command | Description |
+|---|---|
+| `/rich` | Send the formatted sample to yourself, from the control bot |
+| `/rich <id>` | Send the same sample **from your own account** to that chat |
 
 ### Memory & scheduling
 | Command | Description |
@@ -161,17 +168,69 @@ All commands go to your **control bot**, and only your `OWNER_IDS` can use them.
 
 ---
 
+## Rich messages
+
+Replies are plain text on purpose — formatted small talk looks synthetic. But
+the control bot, the `/start` screen and anything you send deliberately can use
+Telegram's full formatting, built in [`core/rich.py`](core/rich.py):
+
+**bold**, *italic*, underline, ~~strikethrough~~, `inline code`, syntax-highlighted
+code blocks, real hyperlinks, tap-to-reveal **spoilers**, ordinary blockquotes and
+**expandable** blockquotes that start collapsed.
+
+Send `/rich` to see all of it in one message, or `/rich <user id>` to have it
+arrive **from your own account**, exactly as a contact would receive it. There is
+also an offline preview:
+
+```bash
+python scripts/render_rich_preview.py docs/rich-preview.html
+```
+
+Two details worth knowing if you extend it:
+
+- Telethon's HTML parser has no tag for spoilers or expandable quotes. Those
+  need raw `MessageEntity` objects, which is what `RichMessage` builds.
+- Entity offsets are counted in **UTF-16 code units, not Python characters**.
+  One emoji outside the basic plane shifts every entity after it by one. The
+  builder counts correctly, so emoji are safe anywhere in the text.
+
+---
+
+## The bot's own look
+
+`assets/` holds the generated artwork:
+
+| File | Use |
+|---|---|
+| `assets/profile.jpg` | Profile picture — set it with @BotFather → `/setuserpic` |
+| `assets/start.jpg` | Banner sent with `/start` |
+
+---
+
 ## Staying un-banned
 
 Telegram restricts accounts that behave mechanically. This is the part most auto-reply projects ignore, so it is worth being explicit about what the bot does on your behalf:
 
-- **Never answers instantly.** It reads, pauses, and types at human speed, in bursts for longer replies.
-- **Caps its own volume** — per chat, per hour and per day (`/limits` shows the current usage).
-- **Waits longer before the first reply to a new chat**, which is where instant answers look most artificial.
-- **Only one reply in flight per chat**, so a burst of messages never produces a burst of answers.
-- **Ignores groups** unless you allow them *and* you're mentioned.
-- **Respects quiet hours** — nobody types at 4am every night for a month.
-- **Backs off on Telegram's own `FloodWait`** instead of retrying into a limit.
+| Layer | What it stops |
+|---|---|
+| **Human typing** | Reads, pauses, types at human speed — never answers instantly |
+| **Per-chat cooldown** | Machine-gunning one conversation |
+| **Account-wide minimum gap** | A burst spread thinly over ten chats — Telegram judges the *account*, not the chat |
+| **Burst damping** | Speeding up exactly when you should slow down: every reply in the last 10 minutes adds delay, up to 45s |
+| **Volume caps** | Per chat, per hour, per day (`/limits` shows live usage) |
+| **New-chat pause** | Instant answers to someone who just messaged you for the first time |
+| **Stranger guardian** | Unknown senders wait ~25s, and get at most **3** replies before the bot stops and pings you |
+| **Stranger screening** | Auto-replying to scams, phishing, investment pitches, prize bait and link spam — a reply confirms your number is live |
+| **Duplicate guard** | Sending the same (or nearly the same) text twice within 30 minutes — the single clearest spam signal |
+| **Echo-loop guard** | Ping-pong with another bot or a stuck client repeating one message |
+| **Quiet hours** | Replying at 4am, and everything is 2.5× slower near those hours |
+| **One reply in flight** | A burst of incoming messages producing a burst of answers |
+| **Group locks** | Groups you have not allowed, and messages that do not mention you |
+| **FloodWait backoff** | Retrying into a limit Telegram has already announced |
+| **Silence on failure** | A canned "I'm busy" line repeated across chats when the AI is down |
+
+Anything the guardian blocks is reported to you in `/limits`, and the higher-risk
+blocks (a screened stranger, a reply cap reached) ping you directly.
 
 The defaults are conservative on purpose. Every one is tunable in [`.env.example`](.env.example).
 
@@ -189,6 +248,10 @@ Every setting is an environment variable, documented in [`.env.example`](.env.ex
 | `TIMEZONE` | `Asia/Kolkata` | Quiet hours, schedules, daily counter |
 | `PER_CHAT_HOURLY_LIMIT` | `30` | Replies to one chat per hour |
 | `GLOBAL_DAILY_LIMIT` | `500` | Replies across all chats per day |
+| `GLOBAL_MIN_GAP` | `8.0` | Minimum seconds between any two outgoing messages |
+| `STRANGER_MAX_REPLIES` | `3` | Replies an unknown sender can pull out of the account |
+| `STRANGER_SCREENING` | `true` | Refuse to auto-reply to scam and spam patterns |
+| `DUPLICATE_WINDOW` | `1800` | Seconds a sent message is remembered, to avoid repeats |
 | `HISTORY_LIMIT` | `20` | Turns of context sent to the model |
 | `REACTIONS_ENABLED` | `true` | React to incoming DMs with an emoji |
 | `LOG_LEVEL` | `INFO` | `DEBUG` for troubleshooting |
@@ -222,7 +285,8 @@ main.py                 startup, health endpoint, graceful shutdown
 config.py               typed settings, validated at boot
 core/
 ├── personas.py         the three personalities + shared house rules
-├── safety.py           rate limits and anti-ban decisions
+├── safety.py           rate limits, stranger guardian, duplicate guard
+├── rich.py             formatted-message builder (UTF-16 safe entities)
 ├── humanize.py         typing rhythm, reactions, quiet hours
 └── logging_setup.py    structured logging
 handlers/
@@ -231,7 +295,9 @@ handlers/
 ├── ai.py               providers, failover, fragment buffering
 └── scheduler.py        daily greetings
 database/mongo.py       storage, encryption, retention
-tests/                  51 tests, no network required
+assets/                 profile picture and /start banner
+scripts/                offline rich-message preview renderer
+tests/                  95 tests, no network required
 ```
 
 ---
@@ -240,7 +306,7 @@ tests/                  51 tests, no network required
 
 ```bash
 pip install -r requirements.txt pytest pytest-asyncio ruff
-python -m pytest -q      # 51 tests, all offline
+python -m pytest -q      # 95 tests, all offline
 ruff check . && ruff format --check .
 ```
 
@@ -271,6 +337,34 @@ Check `/status` first:
 <summary><b>Replies sound wrong</b></summary>
 
 `/persona` switches the tone. For something specific, `/prompt` takes a free-text personality and overrides the persona entirely; `/clearprompt` reverts.
+</details>
+
+<details>
+<summary><b>Scheduled messages arrive at the wrong time</b></summary>
+
+Open `/healthz` and look at the `timezone` block, or send `/status`:
+
+```json
+"timezone": { "configured": "Asia/Kolkata", "effective": "Asia/Kolkata",
+              "resolved": true, "local_time": "2026-09-07T18:40:00+05:30" }
+```
+
+If `resolved` is `false`, Python could not find the zone and everything is
+running on UTC — an 08:00 schedule fires at 13:30 IST. Either the name is
+misspelled (it must be an IANA name like `Asia/Kolkata`, not `IST`), or the
+image is missing the timezone database. The Dockerfile installs `tzdata` and
+it is pinned in `requirements.txt`; a stripped-down base image without both
+will hit this.
+</details>
+
+<details>
+<summary><b>Every AI provider fails in /diag</b></summary>
+
+Providers retire models. Groq shut down its Llama chat models in August 2026,
+and a request to a decommissioned model id returns `404 model_not_found` every
+time. The bot now detects that and pauses the provider for six hours instead
+of paying the round trip on every message — but the fix is to update the model
+id in `handlers/ai.py` against the provider's current list.
 </details>
 
 <details>
