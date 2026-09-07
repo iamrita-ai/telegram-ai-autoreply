@@ -39,3 +39,14 @@ services:
         value: "true"
       - key: KEEPALIVE_INTERVAL
         value: "600"
+      # Behaviour that makes the account read like a person: the read receipt
+      # goes out after the reply, and the full-screen reaction is saved for
+      # news that deserves it.
+      - key: MARK_AS_READ
+        value: "true"
+      - key: BIG_REACTIONS
+        value: "true"
+      # Bot API 10.1 panels for the control bot. Falls back to plain markdown
+      # on any server that does not implement sendRichMessage.
+      - key: RICH_MESSAGES
+        value: "true"

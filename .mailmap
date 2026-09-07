@@ -1,0 +1,5 @@
+# One author, whatever a tool or a stray git config called itself at the
+# time. Keeps git shortlog and git log honest after any future rewrite.
+iamrita-ai <amritanoob2005@gmail.com> <bot@users.noreply.github.com>
+iamrita-ai <amritanoob2005@gmail.com> <bot@example.com>
+iamrita-ai <amritanoob2005@gmail.com> <bot@local>
