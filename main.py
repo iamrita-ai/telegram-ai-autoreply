@@ -13,6 +13,13 @@ from typing import Any
 
 from aiohttp import web
 from telethon import TelegramClient
+from telethon.errors import (
+    AuthKeyDuplicatedError,
+    AuthKeyUnregisteredError,
+    SessionRevokedError,
+    UserDeactivatedBanError,
+    UserDeactivatedError,
+)
 from telethon.sessions import StringSession
 from telethon.tl.functions.account import UpdateStatusRequest
 
@@ -25,6 +32,9 @@ from handlers import control, scheduler, userbot
 log = logging.getLogger("autoreply")
 
 _STARTED_AT = time.time()
+
+#: The control bot, so background code can reach the owner.
+_bot: TelegramClient | None = None
 _tasks: set[asyncio.Task] = set()
 _clients: list[TelegramClient] = []
 
@@ -94,12 +104,46 @@ async def _start_health_server() -> web.AppRunner:
 # ──────────────────────────────────────────────────────────────────────────
 #  Userbot startup
 # ──────────────────────────────────────────────────────────────────────────
-async def _launch(client: TelegramClient, me: Any = None) -> bool:
-    if not client.is_connected():
-        await client.connect()
-    if not await client.is_user_authorized():
-        log.warning("a stored session is no longer authorised - skipping it")
-        return False
+#: Auth failures that mean a stored session is dead for good. Anything else
+#: (a network blip, a Telegram outage) must NOT cost the user their session.
+_DEAD_SESSION_ERRORS = (
+    AuthKeyUnregisteredError,
+    AuthKeyDuplicatedError,
+    SessionRevokedError,
+    UserDeactivatedError,
+    UserDeactivatedBanError,
+)
+
+
+async def _notify_owners(text: str) -> None:
+    """Tell the owner something they have to act on, via the control bot."""
+    if _bot is None:
+        return
+    for owner_id in settings.owner_ids:
+        with contextlib.suppress(Exception):
+            await _bot.send_message(owner_id, text)
+
+
+async def _launch(client: TelegramClient, me: Any = None) -> str:
+    """Start one client. Returns "ok", "dead" or "retry".
+
+    "dead" means the session will never work again and should be deleted;
+    "retry" means something transient went wrong and the session is kept.
+    """
+    try:
+        if not client.is_connected():
+            await client.connect()
+        authorised = await client.is_user_authorized()
+    except _DEAD_SESSION_ERRORS as exc:
+        log.warning("stored session is dead (%s)", type(exc).__name__)
+        return "dead"
+    except Exception as exc:
+        log.warning("could not start a stored session (%s) - keeping it", type(exc).__name__)
+        return "retry"
+
+    if not authorised:
+        log.warning("a stored session is no longer authorised")
+        return "dead"
 
     me = me or await client.get_me()
     display_name = me.first_name or me.username or "me"
@@ -115,26 +159,76 @@ async def _launch(client: TelegramClient, me: Any = None) -> bool:
     _clients.append(client)
 
     log.info("auto-reply active for %s (@%s)", display_name, me.username or me.id)
-    return True
+    return "ok"
 
 
 async def start_user_client(existing_client: TelegramClient = None, me=None) -> None:
-    """Start one freshly signed-in client, or every stored session."""
+    """Start one freshly signed-in client, or restore every stored session.
+
+    A redeploy must never ask the owner to sign in again: the session lives
+    in MongoDB, so it is decrypted and resumed here. Only a session that is
+    provably unusable is deleted, and the owner is told when that happens so
+    the bot is never silently doing nothing.
+    """
     if existing_client is not None:
         await _launch(existing_client, me)
         return
 
-    sessions = await mongo.load_all_sessions()
+    sessions, broken = await mongo.load_session_records()
+
+    for user_id in broken:
+        # Undecryptable: ENCRYPTION_KEY was rotated or the row is corrupt.
+        # It can never be recovered, so clear it out and say so.
+        await mongo.delete_session(user_id)
+        log.error(
+            "session for %s could not be decrypted (ENCRYPTION_KEY changed?) - deleted",
+            user_id,
+        )
+        await _notify_owners(
+            "🔑 A stored login could not be decrypted, so it has been removed.\n\n"
+            "This happens when ENCRYPTION_KEY changes between deploys. Send "
+            "/login to sign in again — and keep that key stable from now on, "
+            "or every redeploy will log the account out."
+        )
+
     if not sessions:
-        log.info("no stored session yet - send /login to the control bot")
+        if not broken:
+            log.info("no stored session yet - send /login to the control bot")
         return
 
     for record in sessions:
-        client = TelegramClient(
-            StringSession(record["session"]), settings.api_id, settings.api_hash
-        )
-        if not await _launch(client):
-            log.warning("session for %s is invalid", record.get("user_id"))
+        user_id = record.get("user_id")
+        try:
+            client = TelegramClient(
+                StringSession(record["session"]), settings.api_id, settings.api_hash
+            )
+        except ValueError:
+            # A truncated or corrupted session string. Telethon raises here,
+            # which would otherwise abort startup entirely and leave the
+            # service crash-looping with no obvious cause.
+            await mongo.delete_session(user_id)
+            log.error("session for %s is corrupt and could not be parsed - deleted", user_id)
+            await _notify_owners(
+                "⚠️ A saved login was corrupted and has been removed. Send /login to sign in again."
+            )
+            continue
+        outcome = await _launch(client)
+        if outcome == "ok":
+            continue
+        with contextlib.suppress(Exception):
+            await client.disconnect()
+        if outcome == "dead":
+            await mongo.delete_session(user_id)
+            log.error("session for %s is no longer valid - deleted", user_id)
+            await _notify_owners(
+                "⚠️ The saved login for this account stopped working — it was "
+                "signed out from Telegram, revoked, or the account was "
+                "restricted.\n\nThe broken session has been deleted. "
+                "Send /login to connect it again."
+            )
+        else:
+            log.warning("session for %s kept, will retry on next restart", user_id)
+
     log.info("%d account(s) running", len(_clients))
 
 
@@ -170,12 +264,14 @@ async def main() -> None:
     runner = await _start_health_server()
     await mongo.connect()
 
+    global _bot
     bot = TelegramClient(
         StringSession(await mongo.get_setting("control_session", "")),
         settings.api_id,
         settings.api_hash,
     )
     await bot.start(bot_token=settings.bot_token)
+    _bot = bot
     # Persist the control-bot session so a restart does not re-authenticate
     # (the old code wrote a bot_session file that Render throws away).
     await mongo.set_setting("control_session", bot.session.save())

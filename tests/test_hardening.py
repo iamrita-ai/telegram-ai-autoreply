@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from cryptography.fernet import Fernet
 
 from config import Settings
 from core.rich import RichMessage, demo_message, utf16_len
@@ -61,7 +62,7 @@ def test_bad_timezone_is_logged_not_swallowed(monkeypatch, caplog) -> None:
         ("BOT_TOKEN", "x"),
         ("OWNER_IDS", "1"),
         ("MONGO_URI", "mongodb://x"),
-        ("ENCRYPTION_KEY", "x"),
+        ("ENCRYPTION_KEY", Fernet.generate_key().decode()),
         ("GROQ_API_KEY", "x"),
     ):
         monkeypatch.setenv(key, value)
@@ -508,3 +509,149 @@ def test_configured_voice_is_a_real_orpheus_voice() -> None:
     from config import Settings
 
     assert Settings().voice_name in ai.TTS_VOICES
+
+
+# ── configuration errors that reached production ────────────────────────────
+
+
+def test_invalid_fernet_key_is_reported_at_boot(monkeypatch) -> None:
+    """It used to crash inside mongo.connect() with a raw ValueError."""
+    from config import ConfigError, Settings
+
+    for key, value in (
+        ("API_ID", "1"),
+        ("API_HASH", "x"),
+        ("BOT_TOKEN", "x"),
+        ("OWNER_IDS", "1"),
+        ("MONGO_URI", "mongodb://x"),
+        ("GROQ_API_KEY", "x"),
+    ):
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("ENCRYPTION_KEY", "not-a-real-fernet-key")
+
+    with pytest.raises(ConfigError) as excinfo:
+        Settings().validate()
+    assert "ENCRYPTION_KEY is not a valid Fernet key" in str(excinfo.value)
+
+
+def test_a_real_fernet_key_passes_validation(monkeypatch) -> None:
+    from cryptography.fernet import Fernet
+
+    from config import Settings
+
+    for key, value in (
+        ("API_ID", "1"),
+        ("API_HASH", "x"),
+        ("BOT_TOKEN", "x"),
+        ("OWNER_IDS", "1"),
+        ("MONGO_URI", "mongodb://x"),
+        ("GROQ_API_KEY", "x"),
+    ):
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("ENCRYPTION_KEY", Fernet.generate_key().decode())
+    Settings().validate()  # must not raise
+
+
+# ── session survives a redeploy ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_stored_session_is_restored_without_asking_to_log_in() -> None:
+    """A redeploy must not send the owner back to /login."""
+    import main
+
+    records = ([{"user_id": 7, "session": "sess"}], [])
+    with (
+        patch.object(main.mongo, "load_session_records", AsyncMock(return_value=records)),
+        patch.object(main.mongo, "delete_session", AsyncMock()) as delete,
+        patch.object(main, "_launch", AsyncMock(return_value="ok")),
+        patch.object(main, "TelegramClient", lambda *a, **k: AsyncMock()),
+        patch.object(main, "StringSession", lambda *a, **k: object()),
+    ):
+        await main.start_user_client()
+    delete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_undecryptable_session_is_deleted_and_reported() -> None:
+    """A rotated ENCRYPTION_KEY leaves a row that can never work again."""
+    import main
+
+    with (
+        patch.object(main.mongo, "load_session_records", AsyncMock(return_value=([], [7]))),
+        patch.object(main.mongo, "delete_session", AsyncMock()) as delete,
+        patch.object(main, "_notify_owners", AsyncMock()) as notify,
+    ):
+        await main.start_user_client()
+    delete.assert_awaited_once_with(7)
+    assert "ENCRYPTION_KEY" in notify.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_a_revoked_session_is_deleted_so_login_can_replace_it() -> None:
+    import main
+
+    records = ([{"user_id": 7, "session": "sess"}], [])
+    with (
+        patch.object(main.mongo, "load_session_records", AsyncMock(return_value=records)),
+        patch.object(main.mongo, "delete_session", AsyncMock()) as delete,
+        patch.object(main, "_launch", AsyncMock(return_value="dead")),
+        patch.object(main, "_notify_owners", AsyncMock()) as notify,
+        patch.object(main, "TelegramClient", lambda *a, **k: AsyncMock()),
+        patch.object(main, "StringSession", lambda *a, **k: object()),
+    ):
+        await main.start_user_client()
+    delete.assert_awaited_once_with(7)
+    assert "/login" in notify.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_a_network_blip_never_deletes_a_good_session() -> None:
+    """Deleting on a transient error would log the user out for nothing."""
+    import main
+
+    records = ([{"user_id": 7, "session": "sess"}], [])
+    with (
+        patch.object(main.mongo, "load_session_records", AsyncMock(return_value=records)),
+        patch.object(main.mongo, "delete_session", AsyncMock()) as delete,
+        patch.object(main, "_launch", AsyncMock(return_value="retry")),
+        patch.object(main, "TelegramClient", lambda *a, **k: AsyncMock()),
+        patch.object(main, "StringSession", lambda *a, **k: object()),
+    ):
+        await main.start_user_client()
+    delete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_transient_connect_errors_are_retryable_not_fatal() -> None:
+    import main
+
+    client = AsyncMock()
+    client.is_connected = lambda: False
+    client.connect = AsyncMock(side_effect=OSError("network unreachable"))
+    assert await main._launch(client) == "retry"
+
+
+@pytest.mark.asyncio
+async def test_an_unauthorised_session_is_dead() -> None:
+    import main
+
+    client = AsyncMock()
+    client.is_connected = lambda: True
+    client.is_user_authorized = AsyncMock(return_value=False)
+    assert await main._launch(client) == "dead"
+
+
+@pytest.mark.asyncio
+async def test_a_corrupt_session_string_does_not_crash_startup() -> None:
+    """Telethon raises ValueError on a truncated string; boot must survive."""
+    import main
+
+    records = ([{"user_id": 7, "session": "truncated"}], [])
+    with (
+        patch.object(main.mongo, "load_session_records", AsyncMock(return_value=records)),
+        patch.object(main.mongo, "delete_session", AsyncMock()) as delete,
+        patch.object(main, "_notify_owners", AsyncMock()),
+    ):
+        await main.start_user_client()  # real StringSession, real ValueError
+    delete.assert_awaited_once_with(7)

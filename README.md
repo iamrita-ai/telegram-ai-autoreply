@@ -331,7 +331,7 @@ handlers/
 database/mongo.py       storage, encryption, retention
 assets/                 profile picture and /start banner
 scripts/                offline rich-message preview renderer
-tests/                  104 tests, no network required
+tests/                  113 tests, no network required
 ```
 
 ---
@@ -340,7 +340,7 @@ tests/                  104 tests, no network required
 
 ```bash
 pip install -r requirements.txt pytest pytest-asyncio ruff
-python -m pytest -q      # 104 tests, all offline
+python -m pytest -q      # 113 tests, all offline
 ruff check . && ruff format --check .
 ```
 
@@ -399,6 +399,33 @@ and a request to a decommissioned model id returns `404 model_not_found` every
 time. The bot now detects that and pauses the provider for six hours instead
 of paying the round trip on every message — but the fix is to update the model
 id in `handlers/ai.py` against the provider's current list.
+</details>
+
+<details>
+<summary><b>"Fernet key must be 32 url-safe base64-encoded bytes"</b></summary>
+
+`ENCRYPTION_KEY` is not a valid Fernet key. It must be exactly 44 characters
+of url-safe base64, ending in `=`. Generate one:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+The bot now reports this at startup alongside any other missing settings,
+instead of crashing once the health server is already up.
+</details>
+
+<details>
+<summary><b>It asks me to /login again after every deploy</b></summary>
+
+The session is stored encrypted in MongoDB and restored on boot, so a redeploy
+should never need a new login. If it does, `ENCRYPTION_KEY` is changing between
+deploys — a session encrypted with the old key cannot be read with the new one.
+Set it once in Render's Environment tab and leave it alone.
+
+When a session genuinely cannot be recovered, the bot deletes the broken record
+and messages you to sign in again, rather than silently starting with zero
+accounts. Transient failures (network, Telegram outage) never delete anything.
 </details>
 
 <details>

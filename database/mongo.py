@@ -151,12 +151,28 @@ async def load_session(user_id: int | None = None) -> str | None:
 
 
 async def load_all_sessions() -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
+    usable, _ = await load_session_records()
+    return usable
+
+
+async def load_session_records() -> tuple[list[dict[str, Any]], list[int]]:
+    """Return ``(usable_sessions, undecryptable_user_ids)``.
+
+    A session that cannot be decrypted is almost always a rotated or
+    corrupted ENCRYPTION_KEY. It will never work again, so the caller
+    deletes it and asks the owner to sign in once more - otherwise the row
+    sits there forever and every restart silently starts zero accounts.
+    """
+    usable: list[dict[str, Any]] = []
+    broken: list[int] = []
     async for doc in _collection("sessions").find({}):
+        user_id = doc.get("user_id", 0)
         session = _decrypt(doc.get("session", ""))
         if session:
-            out.append({"user_id": doc.get("user_id", 0), "session": session})
-    return out
+            usable.append({"user_id": user_id, "session": session})
+        else:
+            broken.append(user_id)
+    return usable, broken
 
 
 async def delete_session(user_id: int | None = None) -> int:

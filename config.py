@@ -16,6 +16,18 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 log = logging.getLogger(__name__)
 
+
+def _is_valid_fernet_key(key: str) -> bool:
+    """Would ``Fernet(key)`` succeed? Checked at boot so it fails loudly."""
+    try:
+        from cryptography.fernet import Fernet
+
+        Fernet(key.encode())
+    except Exception:
+        return False
+    return True
+
+
 __all__ = ["ConfigError", "Settings", "settings"]
 
 
@@ -230,6 +242,17 @@ class Settings:
             problems.append(
                 "ENCRYPTION_KEY is not set - session strings would be stored in "
                 "plain text. Generate one with: "
+                'python -c "from cryptography.fernet import Fernet; '
+                'print(Fernet.generate_key().decode())"'
+            )
+        elif not _is_valid_fernet_key(self.encryption_key):
+            # This used to surface as "ValueError: Fernet key must be 32
+            # url-safe base64-encoded bytes" from inside mongo.connect(),
+            # after the health server was already listening.
+            problems.append(
+                "ENCRYPTION_KEY is not a valid Fernet key. It must be exactly "
+                "44 characters of url-safe base64 (it ends with '='). "
+                "Generate one with: "
                 'python -c "from cryptography.fernet import Fernet; '
                 'print(Fernet.generate_key().decode())"'
             )
