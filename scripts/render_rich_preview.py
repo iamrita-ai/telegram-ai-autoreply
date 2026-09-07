@@ -101,7 +101,7 @@ _PAGE = """<!doctype html>
   .meta {{ text-align:right; font-size:11px; color:#6d7f8f; margin-top:6px; }}
 </style>
 <div class="phone">
-  <div class="caption">how /rich renders in Telegram — hover the spoiler to reveal</div>
+  <div class="caption">how /rich renders in Telegram - hover the spoiler to reveal</div>
   <div class="bubble">{body}<div class="meta">09:41 ✓✓</div></div>
 </div>
 """

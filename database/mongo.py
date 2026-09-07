@@ -41,6 +41,7 @@ __all__ = [
     "allow_group",
     "blacklist_user",
     "clear_all_history",
+    "clear_all_pending",
     "clear_history",
     "clear_pending",
     "connect",
@@ -472,6 +473,12 @@ async def get_pending(owner: int, peer_id: int, max_age_minutes: int = 10) -> li
 
 async def clear_pending(owner: int, peer_id: int) -> None:
     await _collection("pending").delete_one({"owner_id": int(owner), "peer_id": int(peer_id)})
+
+
+async def clear_all_pending(owner: int) -> int:
+    """Drop every held fragment for one owner. Used by /clearcache."""
+    result = await _collection("pending").delete_many({"owner_id": int(owner)})
+    return result.deleted_count
 
 
 # ──────────────────────────────────────────────────────────────────────────

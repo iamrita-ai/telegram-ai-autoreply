@@ -263,7 +263,7 @@ async def start_user_client(
             owner_id,
             "🔑 A stored login could not be decrypted, so it has been removed.\n\n"
             "This happens when ENCRYPTION_KEY changes between deploys. Send "
-            "/login to sign in again — and keep that key stable from now on, "
+            "/login to sign in again - and keep that key stable from now on, "
             "or every redeploy will log the account out.",
         )
 
@@ -299,7 +299,7 @@ async def start_user_client(
             log.error("session for %s is no longer valid - deleted", owner_id)
             await _notify(
                 owner_id,
-                "⚠️ The saved login for this account stopped working — it was "
+                "⚠️ The saved login for this account stopped working - it was "
                 "signed out from Telegram, revoked, or the account was "
                 "restricted.\n\nThe broken session has been deleted. "
                 "Send /login to connect it again.",
@@ -360,6 +360,10 @@ async def main() -> None:
 
     userbot.set_notifier(_notify)
     control.register(bot, start_user_client)
+    # The command menu next to the message box, so nothing has to be typed
+    # from memory. Never fatal: a menu is a convenience.
+    with contextlib.suppress(Exception):
+        await control.publish_commands(bot)
     me = await bot.get_me()
     log.info("control bot @%s ready", me.username)
 

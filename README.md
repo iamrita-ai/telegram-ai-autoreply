@@ -16,11 +16,11 @@ You stay signed in as yourself. A separate control bot is your remote: pause it,
 
 | | |
 |---|---|
-| 🎭 **Three personalities** | Professional, Casual or Romantic — switch instantly with `/persona`, or write your own with `/prompt` |
+| 🎭 **Three personalities** | Professional, Casual or Romantic - switch instantly with `/persona`, or write your own with `/prompt` |
 | 🇬🇧 **English throughout** | Every reply, command and message is in English |
 | 🛡 **Account-safety rails** | Rate limits, cooldowns and human pacing, because Telegram bans accounts that behave like bots |
 | 🧠 **Remembers the conversation** | 14 days per DM, 24 hours per group, kept apart so a group thread never leaks into a private one |
-| ⌨️ **Types like a person** | Reads, pauses, types in bursts — no instant robotic answers |
+| ⌨️ **Types like a person** | Reads, pauses, types in bursts - no instant robotic answers |
 | 👥 **Groups are opt-in** | Only allowed groups, and only when you're actually mentioned |
 | 😴 **Quiet hours** | Silent between the hours you choose, in *your* timezone |
 | 📅 **Scheduled messages** | Daily morning / afternoon / night greetings, freshly written each time |
@@ -58,7 +58,7 @@ Two Telegram identities, one process. The **control bot** never reads your DMs; 
 | Value | Where from |
 |---|---|
 | `API_ID`, `API_HASH` | [my.telegram.org](https://my.telegram.org) → API development tools |
-| `BOT_TOKEN` | [@BotFather](https://t.me/BotFather) → `/newbot` — this is the *control* bot |
+| `BOT_TOKEN` | [@BotFather](https://t.me/BotFather) → `/newbot` - this is the *control* bot |
 | `OWNER_IDS` | Forward any message to [@userinfobot](https://t.me/userinfobot) |
 | `MONGO_URI` | A free [MongoDB Atlas](https://www.mongodb.com/atlas) cluster |
 | An AI key | [Groq](https://console.groq.com) (free tier), [SambaNova](https://cloud.sambanova.ai), or [NVIDIA NIM](https://build.nvidia.com) |
@@ -77,7 +77,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 1. Fork this repo.
 2. **New → Web Service**, point it at your fork. `render.yaml` sets the rest up.
 3. Add the environment variables from [`.env.example`](.env.example) in the dashboard.
-4. Deploy, then open `https://your-app.onrender.com/healthz` — it should return JSON.
+4. Deploy, then open `https://your-app.onrender.com/healthz` - it should return JSON.
 
 </details>
 
@@ -114,14 +114,14 @@ Message your control bot:
 
 It asks for the phone number of the account that should auto-reply, then the code Telegram sends you, then your 2FA password if you have one. **Your code and password messages are deleted automatically.**
 
-That's it — the account starts replying.
+That's it - the account starts replying.
 
 ---
 
 ## Who can use it
 
 The bot is **public**: anyone can open it, connect their own Telegram account
-and get their own auto-reply. Each person is completely separate — their own
+and get their own auto-reply. Each person is completely separate - their own
 persona, custom prompt, quiet hours, blocked list, groups, schedules, voice
 settings, conversation history and rate limits. Nobody can see or change
 anybody else's.
@@ -136,6 +136,12 @@ Every user can erase themselves completely with `/deleteme`.
 ## Commands
 
 All commands go to the **control bot**, and act only on your own account.
+
+Everything is registered in Telegram's **command menu**, so tap the menu button
+next to the message box and pick one instead of typing it. `/start` and `/help`
+also carry buttons for the things people reach for most: status, limits,
+persona, prompt, pause, resume, clear cache and log out. Destructive buttons
+ask before they act.
 
 ### Account
 | Command | Description |
@@ -156,7 +162,8 @@ All commands go to the **control bot**, and act only on your own account.
 | Command | Description |
 |---|---|
 | `/persona` | Pick Professional, Casual or Romantic |
-| `/prompt <text>` | Write your own personality; overrides the persona |
+| `/prompt` | Write your own personality, across as many messages as you like |
+| `/done` | Finish a prompt you are writing (or just send the word `done`) |
 | `/clearprompt` | Go back to the chosen persona |
 | `/model` | Pick an AI provider, or leave it automatic |
 
@@ -200,14 +207,57 @@ All commands go to the **control bot**, and act only on your own account.
 | Command | Description |
 |---|---|
 | `/forget <id>` · `/forgetall` | Clear your conversation history |
+| `/clearcache` | Clear history, held fragments **and** the safety counters |
 | `/schedule <id> morning\|afternoon\|night HH:MM` | Daily greeting |
 | `/unschedule <id> <kind>` · `/schedules` | Manage them |
 
 ---
 
+## Writing your own personality
+
+A personality worth having is longer than one message. Telegram splits anything
+past ~4096 characters and people write these in several goes anyway, so
+`/prompt` collects messages until you are finished:
+
+```
+you   /prompt You are Serena, a smart, confident, witty Telegram bot.
+bot   Got the first part, 61 characters. Send more, or send done.
+you   Speak like a real Gen-Z internet user: u, ur, btw, rn, ngl, fr.
+bot   Part 2 added, 124 characters so far.
+you   Never be a yes-man. If the user is wrong, say so.
+you   done
+bot   Prompt saved, 174 characters from 3 messages. It overrides the persona.
+```
+
+The pieces are joined in order, one per line, up to 8000 characters. A **Save
+now** button does the same as typing `done`, and `/cancel` throws the draft
+away without touching the prompt you already had. Nothing is saved until you
+finish, so an abandoned draft cannot half-replace a working personality.
+
+Your prompt overrides the persona completely, but the house rules below are
+still appended to it, so a custom personality cannot accidentally start writing
+essays or announcing that it is an AI.
+
+---
+
+## How it writes
+
+Two rules apply to every message the bot sends, whoever wrote the prompt:
+
+**No em dashes.** Almost nobody types `—` on a phone, and language models
+produce them constantly. Every reply is normalised to commas and full stops
+before it is sent, and a test fails the build if one appears in the source.
+
+**Emoji are rationed.** One per message at most, and usually none. An emoji in
+every sentence reads as marketing, and marketing is what gets reported. Model
+output is capped at one by [`core/style.py`](core/style.py), and the control
+bot's own panels are held to the same standard by a test.
+
+---
+
 ## Rich messages
 
-Replies are plain text on purpose — formatted small talk looks synthetic. But
+Replies are plain text on purpose - formatted small talk looks synthetic. But
 the control bot, the `/start` screen and anything you send deliberately can use
 Telegram's full formatting, built in [`core/rich.py`](core/rich.py):
 
@@ -240,19 +290,19 @@ voice note spoken by Groq's `canopylabs/orpheus-v1-english`.
 
 Worth knowing before you turn it on:
 
-- Orpheus is a **text-to-speech** model, not a chat model — it is deliberately
+- Orpheus is a **text-to-speech** model, not a chat model - it is deliberately
   kept out of the reply fallback chain, where it would fail on every call.
 - Groq's speech endpoint rejects input over **200 characters**, so only short,
   single-line replies are eligible. Everything else stays text.
 - Telegram renders a true voice note only for OGG/Opus. If the endpoint returns
   WAV, the clip is sent as an audio file instead.
-- Voice notes are **never** sent to strangers — audio is far more intrusive
+- Voice notes are **never** sent to strangers - audio is far more intrusive
   than text and is exactly what gets reported.
 - You must accept the model terms once at
   [console.groq.com/playground](https://console.groq.com/playground?model=canopylabs%2Forpheus-v1-english),
   or the endpoint returns 401 and the bot quietly stays on text.
 
-Any failure — no key, terms not accepted, rate limit, oversized text — falls
+Any failure - no key, terms not accepted, rate limit, oversized text - falls
 back to sending the reply as text, so voice can never cost you a message.
 
 ---
@@ -263,7 +313,7 @@ back to sending the reply as text, so voice can never cost you a message.
 
 | File | Use |
 |---|---|
-| `assets/profile.jpg` | Profile picture — set it with @BotFather → `/setuserpic` |
+| `assets/profile.jpg` | Profile picture - set it with @BotFather → `/setuserpic` |
 | `assets/start.jpg` | Banner sent with `/start` |
 
 ---
@@ -274,16 +324,16 @@ Telegram restricts accounts that behave mechanically. This is the part most auto
 
 | Layer | What it stops |
 |---|---|
-| **Human typing** | Reads, pauses, types at human speed, **scaled to the length of the reply** — never answers instantly |
+| **Human typing** | Reads, pauses, types at human speed, **scaled to the length of the reply** - never answers instantly |
 | **Never answers a bot** | Two bots replying to each other at machine speed, which Telegram counts against both |
 | **Per-chat cooldown** | Machine-gunning one conversation _(not applied to your contacts)_ |
-| **Account-wide minimum gap** | A burst spread thinly over ten chats — Telegram judges the *account*, not the chat |
+| **Account-wide minimum gap** | A burst spread thinly over ten chats - Telegram judges the *account*, not the chat |
 | **Burst damping** | Speeding up exactly when you should slow down: every reply in the last 10 minutes adds delay, up to 45s |
 | **Volume caps** | Per chat, per hour, per day (`/limits` shows live usage) _(not applied to your contacts)_ |
 | **New-chat pause** | Instant answers to someone who just messaged you for the first time |
 | **Stranger guardian** | Unknown senders wait ~25s, and get at most **3** replies before the bot stops and pings you |
-| **Stranger screening** | Auto-replying to scams, phishing, investment pitches, prize bait and link spam — a reply confirms your number is live |
-| **Duplicate guard** | Sending the same (or nearly the same) text twice within 30 minutes — the single clearest spam signal |
+| **Stranger screening** | Auto-replying to scams, phishing, investment pitches, prize bait and link spam - a reply confirms your number is live |
+| **Duplicate guard** | Sending the same (or nearly the same) text twice within 30 minutes - the single clearest spam signal |
 | **Echo-loop guard** | Ping-pong with another bot or a stuck client repeating one message |
 | **Quiet hours** | Replying at 4am, and everything is 2.5× slower near those hours |
 | **One reply in flight** | A burst of incoming messages producing a burst of answers |
@@ -334,7 +384,7 @@ matches what is actually being sent:
 | a normal sentence | ~4s |
 | a full paragraph | ~15-20s |
 
-A fixed delay is wrong in both directions — it makes short answers feel dead
+A fixed delay is wrong in both directions - it makes short answers feel dead
 and makes long ones look pre-written. Tune with `TYPING_SPEED`,
 `MIN_TYPING_TIME`, `MAX_TYPING_TIME`, `READING_SPEED` and `THINKING_SPEED`.
 
@@ -355,7 +405,7 @@ Every setting is an environment variable, documented in [`.env.example`](.env.ex
 | `GLOBAL_MIN_GAP` | `8.0` | Minimum seconds between any two outgoing messages |
 | `CONTACT_UNLIMITED` | `true` | Exempt saved contacts from every volume limit |
 | `CONTACT_MIN_GAP` | `2.0` | Pacing gap while talking to a contact |
-| `TYPING_SPEED` | `0.045` | Seconds per character — the reply-length delay curve |
+| `TYPING_SPEED` | `0.045` | Seconds per character - the reply-length delay curve |
 | `MAX_TYPING_TIME` | `18.0` | Ceiling on typing time for a very long reply |
 | `KEEPALIVE` | `true` | Ping the service's own URL so the host does not suspend it |
 | `KEEPALIVE_INTERVAL` | `600` | Seconds between keep-alive pings |
@@ -391,7 +441,7 @@ It returns **503** when no account is signed in, so an uptime monitor catches a 
 Free hosting plans suspend a web service that has received no **inbound HTTP
 request** for about 15 minutes. Telegram traffic runs over an outbound socket
 and does not count, so an idle-looking service can be shut down in the middle
-of a conversation — in the logs that appears as `shutting down` / `bye` a few
+of a conversation - in the logs that appears as `shutting down` / `bye` a few
 minutes after the last reply, with no error.
 
 The service therefore requests its own public URL every 10 minutes. On Render
@@ -430,7 +480,7 @@ handlers/
 database/mongo.py       storage, encryption, retention, per-user scoping
 assets/                 profile picture and /start banner
 scripts/                offline rich-message preview renderer
-tests/                  248 tests, no network required
+tests/                  306 tests, no network required
 ```
 
 ---
@@ -439,7 +489,7 @@ tests/                  248 tests, no network required
 
 ```bash
 pip install -r requirements.txt pytest pytest-asyncio ruff
-python -m pytest -q      # 248 tests, all offline
+python -m pytest -q      # 306 tests, all offline
 ruff check . && ruff format --check .
 ```
 
@@ -448,7 +498,7 @@ cross-module call against the real signature. Mocks accept any arguments, so
 unit tests cannot catch a call site that was missed during a refactor - this
 does.
 
-CI runs the same three checks — lint, tests on 3.11 and 3.12, and a Docker build — on every push.
+CI runs the same three checks - lint, tests on 3.11 and 3.12, and a Docker build - on every push.
 
 ---
 
@@ -475,7 +525,7 @@ Check `/status` first:
 <summary><b>The bot goes quiet after a few minutes, and the logs say "shutting down / bye"</b></summary>
 
 That is the host suspending an idle web service, not a crash. Telegram traffic
-does not count as activity — only inbound HTTP does. Keep-alive is on by
+does not count as activity - only inbound HTTP does. Keep-alive is on by
 default and pings `RENDER_EXTERNAL_URL` every 10 minutes; check the
 `keepalive` block in `/healthz`. If `enabled` is `false`, the platform did not
 supply a public URL, so set `KEEPALIVE_URL` yourself.
@@ -507,7 +557,7 @@ Open `/healthz` and look at the `timezone` block, or send `/status`:
 ```
 
 If `resolved` is `false`, Python could not find the zone and everything is
-running on UTC — an 08:00 schedule fires at 13:30 IST. Either the name is
+running on UTC - an 08:00 schedule fires at 13:30 IST. Either the name is
 misspelled (it must be an IANA name like `Asia/Kolkata`, not `IST`), or the
 image is missing the timezone database. The Dockerfile installs `tzdata` and
 it is pinned in `requirements.txt`; a stripped-down base image without both
@@ -520,7 +570,7 @@ will hit this.
 Providers retire models. Groq shut down its Llama chat models in August 2026,
 and a request to a decommissioned model id returns `404 model_not_found` every
 time. The bot now detects that and pauses the provider for six hours instead
-of paying the round trip on every message — but the fix is to update the model
+of paying the round trip on every message - but the fix is to update the model
 id in `handlers/ai.py` against the provider's current list.
 </details>
 
@@ -543,7 +593,7 @@ instead of crashing once the health server is already up.
 
 The session is stored encrypted in MongoDB and restored on boot, so a redeploy
 should never need a new login. If it does, `ENCRYPTION_KEY` is changing between
-deploys — a session encrypted with the old key cannot be read with the new one.
+deploys - a session encrypted with the old key cannot be read with the new one.
 Set it once in Render's Environment tab and leave it alone.
 
 When a session genuinely cannot be recovered, the bot deletes the broken record
@@ -554,11 +604,11 @@ accounts. Transient failures (network, Telegram outage) never delete anything.
 <details>
 <summary><b>Health check returns 503</b></summary>
 
-No user account is signed in — the control bot is up but nothing is replying. Send `/login`.
+No user account is signed in - the control bot is up but nothing is replying. Send `/login`.
 </details>
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT - see [LICENSE](LICENSE).

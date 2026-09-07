@@ -142,7 +142,7 @@ class RichMessage:
         return utf16_len(self.text)
 
 
-async def send_rich(client, chat, message: RichMessage, *, file=None, reply_to=None):
+async def send_rich(client, chat, message: RichMessage, *, file=None, reply_to=None, buttons=None):
     """Send a :class:`RichMessage`, degrading to plain text if entities fail."""
     text, entities = message.build()
     try:
@@ -152,11 +152,12 @@ async def send_rich(client, chat, message: RichMessage, *, file=None, reply_to=N
             formatting_entities=entities,
             file=file,
             reply_to=reply_to,
+            buttons=buttons,
             link_preview=False,
         )
     except Exception as exc:  # entity errors must never cost the whole message
         log.warning("rich send failed (%s) - falling back to plain text", type(exc).__name__)
-        return await client.send_message(chat, text, file=file, reply_to=reply_to)
+        return await client.send_message(chat, text, file=file, reply_to=reply_to, buttons=buttons)
 
 
 def demo_message(sender_name: str = "Serena") -> RichMessage:
@@ -206,5 +207,5 @@ def demo_message(sender_name: str = "Serena") -> RichMessage:
         .newline()
         .pre('print("syntax highlighted")', language="python")
         .newline()
-        .italic(f"— sent by {sender_name}")
+        .italic(f" - sent by {sender_name}")
     )

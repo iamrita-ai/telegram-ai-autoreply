@@ -383,13 +383,13 @@ async def test_greeting_is_skipped_when_every_provider_fails(monkeypatch) -> Non
 async def test_greeting_is_regenerated_when_the_model_repeats_itself(monkeypatch) -> None:
     monkeypatch.setattr(scheduler, "_RETRY_DELAY", 0)
     scheduler._recent[(1, 7)] = ["Good morning!"]
-    replies = [("Good morning!", "p"), ("Morning — coffee first, then chaos.", "p")]
+    replies = [("Good morning!", "p"), ("Morning - coffee first, then chaos.", "p")]
     with (
         patch.object(scheduler.ai, "_complete", AsyncMock(side_effect=replies)),
         patch.object(scheduler.mongo, "get_persona_key", AsyncMock(return_value="casual")),
     ):
         result = await scheduler._compose(1, "morning", 7)
-    assert result == "Morning — coffee first, then chaos."
+    assert result == "Morning - coffee first, then chaos."
     scheduler._recent.clear()
 
 

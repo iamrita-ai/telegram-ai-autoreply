@@ -8,6 +8,7 @@ schedule would quietly appear in your account.
 from __future__ import annotations
 
 import inspect
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -208,8 +209,11 @@ def test_the_same_contact_id_is_tracked_separately_per_owner() -> None:
 
 
 def test_aggregate_snapshot_sums_every_account() -> None:
-    limiter_for(1).record(1, now=0.0, text="a")
-    limiter_for(2).record(1, now=0.0, text="b")
+    # A real monotonic timestamp: hits older than an hour are expired, and
+    # in a long-lived process time.monotonic() is far past zero.
+    now = time.monotonic()
+    limiter_for(1).record(1, now=now, text="a")
+    limiter_for(2).record(1, now=now, text="b")
     snapshot = aggregate_snapshot()
     assert snapshot["accounts"] == 2
     assert snapshot["replies_last_hour"] == 2

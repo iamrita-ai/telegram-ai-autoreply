@@ -23,6 +23,7 @@ from dataclasses import dataclass
 import httpx
 
 from config import settings
+from core import style
 from core.personas import build_system_prompt
 from database import mongo
 
@@ -338,7 +339,10 @@ def _tidy(reply: str) -> str:
     lines = [line.strip() for line in reply.splitlines() if line.strip()]
     if len(lines) > 4:
         lines = lines[:4]
-    return "\n".join(lines)[:900]
+    # House style: no em dashes, at most one emoji. Models produce both by
+    # the handful, and both are how a human reader decides a message was
+    # written by a machine.
+    return style.clean("\n".join(lines)[:900], max_emoji=1)
 
 
 # ──────────────────────────────────────────────────────────────────────────

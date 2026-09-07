@@ -81,7 +81,8 @@ def test_three_personalities_are_available() -> None:
 def test_every_persona_enforces_the_house_rules(key: str) -> None:
     prompt = build_system_prompt(key)
     assert "English only" in prompt
-    assert "one emoji" in prompt
+    assert "no emoji at all" in prompt  # emoji are rationed, see core/style.py
+    assert "em dashes" in prompt  # models produce them constantly; people do not
     # The account must never out itself as automated.
     assert "never say or imply that you are an ai" in prompt.lower()
 
